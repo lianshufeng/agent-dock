@@ -1,0 +1,149 @@
+package com.github.agentdock.core;
+
+import com.github.agentdock.core.aggregation.impl.DefaultResultAggregator;
+import com.github.agentdock.core.aggregation.CapabilityOutputCombiner;
+import com.github.agentdock.core.aggregation.ResultSummarizer;
+import com.github.agentdock.core.aggregation.impl.DefaultCapabilityOutputCombiner;
+import com.github.agentdock.core.aggregation.impl.DefaultResultSummarizer;
+import com.github.agentdock.core.capability.*;
+import com.github.agentdock.core.event.*;
+import com.github.agentdock.core.event.impl.InMemoryAiEventPublisher;
+import com.github.agentdock.core.intent.IntentFactory;
+import com.github.agentdock.core.intent.IntentRegistry;
+import com.github.agentdock.core.intent.LlmIntentAnalyzer;
+import com.github.agentdock.core.intent.ContextRecallPolicy;
+import com.github.agentdock.core.model.ConversationContext;
+import com.github.agentdock.core.model.ConversationResult;
+import com.github.agentdock.core.model.IntentDefinition;
+import com.github.agentdock.core.store.ChatHistoryStore;
+import com.github.agentdock.core.loop.IntentLoopExecutor;
+import com.github.agentdock.core.loop.IntentLoopPlanner;
+import com.github.agentdock.core.task.TaskPlanner;
+import com.github.agentdock.core.provider.ModelUsageRecorder;
+import com.github.agentdock.core.provider.NoopModelUsageRecorder;
+
+/**
+ * AI 内核的自管理入口。业务项目只需注册自己的适配器和能力，不需要依赖 Spring。
+ */
+public final class AiKernel {
+    /** 意图、能力及事件订阅均由内核实例自行维护，不依赖 Spring 容器。 */
+    private final IntentRegistry intentRegistry = new IntentRegistry();
+    private final IntentFactory intentFactory = new IntentFactory(intentRegistry, null);
+    private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
+    private final InMemoryAiEventPublisher eventPublisher = new InMemoryAiEventPublisher();
+    private ChatHistoryStore chatHistoryStore;
+    private IntentLoopPlanner intentLoopPlanner;
+    private TaskPlanner taskPlanner;
+    private CapabilityVisibilityPolicy capabilityVisibilityPolicy = new AllowAllCapabilityVisibilityPolicy();
+    private CapabilityResolver capabilityResolver = new DefaultCapabilityResolver(capabilityVisibilityPolicy);
+    private CapabilityCandidateSelector capabilityCandidateSelector = new AllEligibleCapabilitySelector();
+    private CapabilityInvoker capabilityInvoker;
+    private ResultSummarizer resultSummarizer = new DefaultResultSummarizer();
+    private CapabilityOutputCombiner capabilityOutputCombiner = new DefaultCapabilityOutputCombiner();
+    private ModelUsageRecorder modelUsageRecorder = NoopModelUsageRecorder.INSTANCE;
+    private AiExecutionMode executionMode = AiExecutionMode.SERIAL;
+
+    public AiKernel registerExecutionMode(AiExecutionMode mode) {
+        this.executionMode = mode == null ? AiExecutionMode.SERIAL : mode;
+        return this;
+    }
+
+    public AiKernel registerModelUsageRecorder(ModelUsageRecorder recorder) {
+        this.modelUsageRecorder = java.util.Objects.requireNonNull(recorder, "模型用量记录器不能为空");
+        return this;
+    }
+
+    public AiKernel registerChatHistoryStore(ChatHistoryStore store) {
+        this.chatHistoryStore = store;
+        return this;
+    }
+
+    public AiKernel registerIntentLoopPlanner(IntentLoopPlanner planner) {
+        this.intentLoopPlanner = planner;
+        return this;
+    }
+
+    public AiKernel registerTaskPlanner(TaskPlanner planner) {
+        this.taskPlanner = planner;
+        return this;
+    }
+
+    public AiKernel registerCapabilityResolver(CapabilityResolver resolver) {
+        this.capabilityResolver = java.util.Objects.requireNonNull(resolver, "能力解析器不能为空");
+        return this;
+    }
+
+    /** 注册候选能力选择器；默认向 LLM 提供全部已通过硬准入的能力。 */
+    public AiKernel registerCapabilityCandidateSelector(CapabilityCandidateSelector selector) {
+        this.capabilityCandidateSelector = java.util.Objects.requireNonNull(selector, "候选能力选择器不能为空");
+        return this;
+    }
+
+    /** 注册独立的能力可见性策略；工具契约本身不绑定任何意图编码。 */
+    public AiKernel registerCapabilityVisibilityPolicy(CapabilityVisibilityPolicy policy) {
+        this.capabilityVisibilityPolicy = java.util.Objects.requireNonNull(policy, "能力可见性策略不能为空");
+        this.capabilityResolver = new DefaultCapabilityResolver(policy);
+        return this;
+    }
+
+    public AiKernel registerCapabilityInvoker(CapabilityInvoker invoker) {
+        this.capabilityInvoker = java.util.Objects.requireNonNull(invoker, "能力调用器不能为空");
+        return this;
+    }
+
+    public AiKernel registerResultSummarizer(ResultSummarizer summarizer) {
+        this.resultSummarizer = java.util.Objects.requireNonNull(summarizer, "结果汇总器不能为空");
+        return this;
+    }
+
+    public AiKernel registerCapabilityOutputCombiner(CapabilityOutputCombiner combiner) {
+        this.capabilityOutputCombiner = java.util.Objects.requireNonNull(combiner, "能力输出组合器不能为空");
+        return this;
+    }
+
+    public AiKernel registerIntent(IntentDefinition definition) {
+        intentRegistry.register(definition);
+        return this;
+    }
+
+    /** 注册全局多意图分析器；每次会话只进行一次意图识别请求。 */
+    public AiKernel registerIntentAnalyzer(LlmIntentAnalyzer analyzer) {
+        intentFactory.setAnalyzer(analyzer);
+        return this;
+    }
+
+    public AiKernel registerContextRecallPolicy(ContextRecallPolicy policy) {
+        intentFactory.setContextRecallPolicy(policy);
+        return this;
+    }
+
+    /** 注册统一能力。 */
+    public AiKernel registerCapability(AiCapability capability) {
+        capabilityRegistry.register(capability);
+        return this;
+    }
+
+    /** 订阅执行事件，宿主可在订阅回调中转发为 SSE。 */
+    public AiKernel subscribe(java.util.function.Consumer<AiEvent> subscriber) {
+        eventPublisher.subscribe(subscriber);
+        return this;
+    }
+
+    /** 执行一次完整会话：意图识别、排序、路由、执行和结果聚合。 */
+    public ConversationResult execute(ConversationContext context) {
+        java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);
+        context.setModelUsageRecorder(modelUsageRecorder);
+        CapabilityInvoker invoker = capabilityInvoker == null
+                ? new DefaultCapabilityInvoker(capabilityRegistry, capabilityVisibilityPolicy) : capabilityInvoker;
+        return new AiExecutionEngine(intentFactory, new DefaultResultAggregator(), resultSummarizer, eventPublisher,
+                new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
+                        capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
+                        capabilityCandidateSelector), chatHistoryStore, executionMode)
+                .execute(context);
+    }
+
+    public void shutdownExecutors() {
+        IntentLoopExecutor.shutdownExecutor();
+        DefaultCapabilityInvoker.shutdownExecutor();
+    }
+}
