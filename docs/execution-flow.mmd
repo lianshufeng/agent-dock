@@ -1,0 +1,38 @@
+flowchart TD
+    start(["提交 ConversationContext"])
+    preload["预加载最近历史"]
+    analyze["一次 LLM 多意图分析"]
+    normalize["校验意图并规范化上下文"]
+    topo["按优先级与 dependsOn 拓扑排序"]
+    clarify{"需要澄清?"}
+    ready["选择依赖已完成的意图"]
+    route{"前置依赖失败?"}
+    skip["标记当前意图为 SKIPPED"]
+    loop["IntentLoopExecutor 有限循环"]
+    plan["规划下一步能力"]
+    bind["按 inputRefs 绑定真实结果"]
+    validate["校验能力与参数 Schema"]
+    invoke["调用能力"]
+    recover{"调用失败且可恢复?"}
+    retry["重试、补偿或替代能力"]
+    observe["记录 AgentObservation"]
+    complete{"意图已满足?"}
+    result["生成 IntentResult"]
+    more{"仍有未执行意图?"}
+    aggregate["聚合全部意图结果"]
+    summary["生成最终摘要并发布 FINAL_RESULT"]
+    wait["返回 WAITING_USER"]
+    finish(["结束"])
+
+    start --> preload --> analyze --> normalize --> topo --> clarify
+    clarify -->|"是"| wait --> finish
+    clarify -->|"否"| ready --> route
+    route -->|"是"| skip --> more
+    route -->|"否"| loop --> plan --> bind --> validate --> invoke --> recover
+    recover -->|"是"| retry --> observe
+    recover -->|"否"| observe
+    observe --> complete
+    complete -->|"否"| plan
+    complete -->|"是"| result --> more
+    more -->|"是"| ready
+    more -->|"否"| aggregate --> summary --> finish
