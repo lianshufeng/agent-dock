@@ -48,24 +48,31 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
     @Override
     public CapabilityCallResult invoke(IntentCandidate intent, AiExecutionContext context,
                                        CapabilityInvocation invocation, int remainingRecoveries) {
+        long startedAt = System.nanoTime();
         AiCapability capability = registry.find(invocation.getCapabilityCode());
-        if (capability == null) return failure("CAPABILITY_NOT_REGISTERED", "未注册能力: " + invocation.getCapabilityCode(), 0);
+        if (capability == null) return failure("CAPABILITY_NOT_REGISTERED", "未注册能力: " + invocation.getCapabilityCode(), 0,
+                invocation.getCapabilityCode(), startedAt);
         CapabilityDefinition definition = capability.definition();
         if (!visibilityPolicy.isVisible(intent, definition, context)) {
-            return failure("CAPABILITY_NOT_ALLOWED", "当前意图不允许调用能力: " + invocation.getCapabilityCode(), 0);
+            return failure("CAPABILITY_NOT_ALLOWED", "当前意图不允许调用能力: " + invocation.getCapabilityCode(), 0,
+                    invocation.getCapabilityCode(), startedAt);
         }
         String validationMessage = invocationValidator.validate(definition, invocation.getArguments());
-        if (validationMessage != null) return failure("INVALID_ARGUMENTS", validationMessage, 0);
+        if (validationMessage != null) return failure("INVALID_ARGUMENTS", validationMessage, 0,
+                invocation.getCapabilityCode(), startedAt);
         boolean locked = definition.isSideEffect();
         if (locked) SIDE_EFFECT_LOCK.lock();
         try {
 
         int recoveries = 0;
+        boolean compensationAttempted = false;
+        String actualCapabilityCode = invocation.getCapabilityCode();
         int retries = retryPolicy.retries(definition, remainingRecoveries);
         CapabilityResult result;
         do {
             context.setCurrentCapabilityInvocation(invocation);
             result = invokeOnce(capability, intent, context, definition.getTimeout());
+            result = validateOutput(definition, result);
             if (result.isSuccess() || !result.isRetryable() || recoveries >= retries) break;
             recoveries++;
         } while (true);
@@ -73,6 +80,7 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         if (!result.isSuccess() && definition.isSideEffect() && definition.isCompensatable()
                 && recoveries < remainingRecoveries) {
             recoveries++;
+            compensationAttempted = true;
             CapabilityResult compensation = compensateOnce(capability, intent, context, invocation, result,
                     definition.getTimeout());
             if (!compensation.isSuccess()) {
@@ -90,10 +98,13 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 CapabilityInvocation fallbackInvocation = new CapabilityInvocation(fallbackCode, invocation.getArguments());
                 context.setCurrentCapabilityInvocation(fallbackInvocation);
                 result = invokeOnce(fallback, intent, context, fallback.definition().getTimeout());
+                result = validateOutput(fallback.definition(), result);
+                actualCapabilityCode = fallbackCode;
                 if (result.isSuccess() || recoveries >= remainingRecoveries) break;
             }
         }
-        return new CapabilityCallResult(result, recoveries);
+        return new CapabilityCallResult(result, recoveries, actualCapabilityCode, compensationAttempted,
+                elapsedMillis(startedAt));
         } finally {
             if (locked) SIDE_EFFECT_LOCK.unlock();
         }
@@ -145,8 +156,21 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         }
     }
 
-    private static CapabilityCallResult failure(String code, String message, int recoveries) {
-        return new CapabilityCallResult(CapabilityResult.failure(code, message, false), recoveries);
+    private CapabilityResult validateOutput(CapabilityDefinition definition, CapabilityResult result) {
+        if (result == null || !result.isSuccess()) return result;
+        String validationMessage = invocationValidator.validateOutput(definition, result.getOutput());
+        return validationMessage == null ? result
+                : CapabilityResult.failure("INVALID_OUTPUT", validationMessage, false);
+    }
+
+    private static CapabilityCallResult failure(String code, String message, int recoveries,
+                                                String actualCapabilityCode, long startedAt) {
+        return new CapabilityCallResult(CapabilityResult.failure(code, message, false), recoveries,
+                actualCapabilityCode, false, elapsedMillis(startedAt));
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
     }
 
     private static List<String> safe(List<String> values) {

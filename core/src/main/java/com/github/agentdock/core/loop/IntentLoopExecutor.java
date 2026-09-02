@@ -183,8 +183,10 @@ public final class IntentLoopExecutor {
                     call.result().isSuccess(), call.recoveryAttempts());
             publish(context, intent, AiEventType.TOOL_RESULT,
                     toolResultMessage(definition, call.result()), 65,
-                    payload("capabilityCode", invocation.getCapabilityCode(), "capabilityDescription", definition.getDescription(),
-                            "result", call.result(), "recoveryAttempts", call.recoveryAttempts()));
+                    payload("requestedCapabilityCode", invocation.getCapabilityCode(),
+                            "capabilityCode", call.actualCapabilityCode(), "capabilityDescription", definition.getDescription(),
+                            "arguments", invocation.getArguments(), "result", call.result(), "recoveryAttempts", call.recoveryAttempts(),
+                            "compensationAttempted", call.compensationAttempted(), "elapsedMillis", call.elapsedMillis()));
             if (call.result().isSuccess()) return IntentResult.success(intent, call.result().getOutput());
             return IntentResult.failed(intent, call.result().getMessage());
         }
@@ -195,16 +197,7 @@ public final class IntentLoopExecutor {
         publish(context, intent, AiEventType.HISTORY_LOADED, "已按当前意图加载 " + history.size() + " 条历史消息", 25,
                 java.util.Map.of("historyCount", history.size(), "requested", intent.getContextRequirement().getHistoryLimit()));
         List<CapabilityDefinition> eligibleCapabilities = capabilityResolver.resolve(intent, context, capabilities);
-        List<CapabilityDefinition> searchableCapabilities = capabilityCandidateSelector.select(intent, context,
-                eligibleCapabilities);
-        log.info("AI 意图可用工具 executionId={}, intentId={}, capabilities={}", context.getConversation().getExecutionId(),
-                intent.getId(), searchableCapabilities.stream().map(CapabilityDefinition::getCode).toList());
-        if (searchableCapabilities.isEmpty()) return IntentResult.failed(intent, "当前意图没有注册可用能力");
-        // 能力目录完全由宿主注册并由解析器筛选；内核不内置能力发现工具。
-        List<CapabilityDefinition> allowedCapabilities = searchableCapabilities;
-        Set<String> allowedCodes = searchableCapabilities.stream()
-                .map(CapabilityDefinition::getCode)
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        if (eligibleCapabilities.isEmpty()) return IntentResult.failed(intent, "当前意图没有注册可用能力");
         int recoveryAttempts = 0;
         int toolCalls = 0;
         String lastFailureSignature = null;
@@ -223,16 +216,17 @@ public final class IntentLoopExecutor {
             }
             request.setPreviousIntentResults(dependencies);
             request.setObservations(List.copyOf(observations));
-            List<CapabilityDefinition> iterationCapabilities = allowedCapabilities;
-            // 对同一复杂导入意图，附件读取成功后下一轮必须保留真实变更能力，防止模型停在只读查询并虚构完成。
-            if (!observations.isEmpty() && intent.getDescription() != null
-                    && intent.getDescription().matches(".*(导入|创建|修改|写入|添加).*")
-                    && observations.stream().anyMatch(item -> "attachment.read".equals(item.getToolCode())
-                            && item.getResult() != null && item.getResult().isSuccess())) {
-                List<CapabilityDefinition> mutations = allowedCapabilities.stream()
-                        .filter(item -> "business.batchMutate".equals(item.getCode())).toList();
-                if (!mutations.isEmpty()) iterationCapabilities = mutations;
-            }
+            context.setCurrentTaskObservation(observations.isEmpty() ? null
+                    : IntentResult.success(intent, observations.get(observations.size() - 1).getResult().getOutput()));
+            List<CapabilityDefinition> iterationCapabilities = capabilityCandidateSelector.select(intent, context,
+                    eligibleCapabilities);
+            if (iterationCapabilities == null || iterationCapabilities.isEmpty())
+                return IntentResult.failed(intent, "当前意图没有符合宿主策略的候选能力");
+            log.info("AI 意图本轮可用工具 executionId={}, intentId={}, iteration={}, capabilities={}",
+                    context.getConversation().getExecutionId(), intent.getId(), iteration + 1,
+                    iterationCapabilities.stream().map(CapabilityDefinition::getCode).toList());
+            Set<String> allowedCodes = iterationCapabilities.stream().map(CapabilityDefinition::getCode)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
             request.setCapabilities(iterationCapabilities);
             request.setIteration(iteration);
             IntentLoopDecision decision;
@@ -263,7 +257,14 @@ public final class IntentLoopExecutor {
             }
             if (decision.getStatus() == IntentLoopDecision.Status.UNRESOLVABLE) {
                 return new IntentResult(intent.getId(), intent.getCode(), IntentStatus.FAILED,
-                        null, decision.getReason() == null ? "意图无法解决" : decision.getReason());
+                        null, decision.getResult() != null && !decision.getResult().isBlank()
+                        ? decision.getResult() : decision.getReason() == null ? "意图无法解决" : decision.getReason());
+            }
+            if (decision.getStatus() == IntentLoopDecision.Status.WAITING_USER) {
+                String question = decision.getResult() == null || decision.getResult().isBlank()
+                        ? decision.getReason() : decision.getResult();
+                return IntentResult.waitingUser(intent,
+                        question == null || question.isBlank() ? "需要补充信息后才能继续" : question);
             }
             if (decision.getToolInvocations() == null || decision.getToolInvocations().isEmpty()) {
                 return IntentResult.failed(intent, "Loop 未返回工具调用方案");
@@ -311,12 +312,19 @@ public final class IntentLoopExecutor {
                         context.getConversation().getExecutionId(), intent.getId(), invocation.getCapabilityCode(),
                         result.isSuccess(), call.recoveryAttempts());
                 recoveryAttempts += call.recoveryAttempts();
-                observations.add(new AgentObservation(invocation.getCapabilityCode(), invocation.getArguments(), result));
+                String actualCapabilityCode = call.actualCapabilityCode() == null
+                        ? invocation.getCapabilityCode() : call.actualCapabilityCode();
+                observations.add(new AgentObservation(actualCapabilityCode, invocation.getCapabilityCode(),
+                        invocation.getArguments(), result, call.recoveryAttempts(),
+                        call.compensationAttempted(), call.elapsedMillis()));
                 publish(context, intent, AiEventType.TOOL_RESULT,
                         toolResultMessage(definition, result), 65,
-                        payload("capabilityCode", invocation.getCapabilityCode(),
+                        payload("requestedCapabilityCode", invocation.getCapabilityCode(),
+                                "capabilityCode", actualCapabilityCode,
                                 "capabilityDescription", definition == null ? null : definition.getDescription(),
-                                "result", result, "recoveryAttempts", call.recoveryAttempts()));
+                                "arguments", invocation.getArguments(), "result", result, "recoveryAttempts", call.recoveryAttempts(),
+                                "compensationAttempted", call.compensationAttempted(),
+                                "elapsedMillis", call.elapsedMillis()));
                 allTerminal &= definition != null && definition.isTerminalResult();
                 allSuccessful &= result.isSuccess();
                 if (result.isSuccess()) outputs.add(result.getOutput());
@@ -426,6 +434,7 @@ public final class IntentLoopExecutor {
 
     private String decisionMessage(IntentLoopDecision decision) {
         if (decision.getStatus() == IntentLoopDecision.Status.COMPLETED) return "现有信息已满足任务目标，准备整理结果";
+        if (decision.getStatus() == IntentLoopDecision.Status.WAITING_USER) return "需要用户补充或确认信息";
         if (decision.getStatus() == IntentLoopDecision.Status.UNRESOLVABLE) return "当前信息不足，无法继续完成任务";
         int count = decision.getToolInvocations() == null ? 0 : decision.getToolInvocations().size();
         return count > 0 ? "已规划下一步，将执行 " + count + " 个工具调用" : "已规划下一步处理方式";

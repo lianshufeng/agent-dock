@@ -12,6 +12,8 @@ public class IntentFactory {
     private final IntentRegistry intentRegistry;
     private LlmIntentAnalyzer analyzer;
     private ContextRecallPolicy contextRecallPolicy = ContextRecallPolicy.noop();
+    private final List<IntentAnalysisPostProcessor> postProcessors = new ArrayList<>();
+    private final List<IntentAnalysisFallback> fallbacks = new ArrayList<>();
 
     public IntentFactory() {
         this(new IntentRegistry(), null);
@@ -35,10 +37,32 @@ public class IntentFactory {
         this.contextRecallPolicy = contextRecallPolicy == null ? ContextRecallPolicy.noop() : contextRecallPolicy;
     }
 
+    public void addPostProcessor(IntentAnalysisPostProcessor postProcessor) {
+        if (postProcessor != null) postProcessors.add(postProcessor);
+    }
+
+    public void addFallback(IntentAnalysisFallback fallback) {
+        if (fallback != null) fallbacks.add(fallback);
+    }
+
     /** 汇总全部通用意图，一次调用 LLM，再生成按依赖关系和优先级排序的串行计划。 */
     public IntentAnalysis analyze(ConversationContext context) {
-        IntentAdapterResult analysis = Optional.ofNullable(analyzer == null ? null : analyzer.analyze(context, buildIntentCatalog()))
-                .orElse(IntentAdapterResult.empty());
+        String intentCatalog = buildIntentCatalog();
+        IntentAdapterResult analysis;
+        RuntimeException analysisFailure = null;
+        try {
+            analysis = Optional.ofNullable(analyzer == null ? null : analyzer.analyze(context, intentCatalog))
+                    .orElse(IntentAdapterResult.empty());
+        } catch (RuntimeException exception) {
+            analysisFailure = exception;
+            analysis = IntentAdapterResult.empty();
+        }
+        if (isEmpty(analysis)) analysis = applyFallbacks(context, intentCatalog);
+        if (isEmpty(analysis) && analysisFailure != null) throw analysisFailure;
+        for (IntentAnalysisPostProcessor postProcessor : postProcessors) {
+            analysis = Optional.ofNullable(postProcessor.process(context, analysis))
+                    .orElseThrow(() -> new IllegalStateException("意图分析后处理器未返回结果"));
+        }
         List<IntentCandidate> candidates = new ArrayList<>();
         ContextRequirement requirement = analysis.getContextRequirement();
         int order = 0;
@@ -82,6 +106,18 @@ public class IntentFactory {
         validateDependencies(candidates);
         List<IntentCandidate> ordered = topologicalSort(candidates);
         return new IntentAnalysis(ordered, requirement, analysis.getClarificationQuestion());
+    }
+
+    private IntentAdapterResult applyFallbacks(ConversationContext context, String intentCatalog) {
+        for (IntentAnalysisFallback fallback : fallbacks) {
+            IntentAdapterResult result = fallback.fallback(context, intentCatalog);
+            if (!isEmpty(result)) return result;
+        }
+        return IntentAdapterResult.empty();
+    }
+
+    private boolean isEmpty(IntentAdapterResult result) {
+        return result == null || result.getCandidates() == null || result.getCandidates().isEmpty();
     }
 
     private ContextRequirement normalizeContextRequirement(ContextRequirement requirement) {

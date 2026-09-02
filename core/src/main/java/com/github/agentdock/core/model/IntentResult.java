@@ -20,4 +20,8 @@ public class IntentResult {
     public static IntentResult skipped(IntentCandidate intent, String message) {
         return new IntentResult(intent.getId(), intent.getCode(), IntentStatus.SKIPPED, null, message);
     }
+
+    public static IntentResult waitingUser(IntentCandidate intent, String message) {
+        return new IntentResult(intent.getId(), intent.getCode(), IntentStatus.WAITING_USER, null, message);
+    }
 }

@@ -9,42 +9,63 @@ import java.util.Map;
 /** 在能力执行前统一校验参数名称、必填约束、类型、枚举和基础范围。 */
 public final class CapabilityInvocationValidator {
     public String validate(CapabilityDefinition definition, Map<String, Object> arguments) {
+        if (definition == null) return "能力契约不能为空";
         Map<String, Object> values = arguments == null ? Map.of() : arguments;
-        Map<String, CapabilitySchemaField> fields = definition.effectiveInputContract();
-        for (String key : values.keySet()) {
-            if (!fields.containsKey(key)) return "能力参数包含未声明字段: " + key;
+        return validateFields(definition.effectiveInputContract(), values, true, "能力参数");
+    }
+
+    /** 输出允许携带额外诊断字段，但所有已声明字段一旦返回就必须符合类型和范围。 */
+    public String validateOutput(CapabilityDefinition definition, Object output) {
+        if (definition == null) return "能力契约不能为空";
+        Map<String, CapabilitySchemaField> fields = definition.effectiveOutputContract();
+        if (fields.isEmpty()) return null;
+        if (!(output instanceof Map<?, ?> raw)) return "能力输出必须是对象";
+        Map<String, Object> values = new java.util.LinkedHashMap<>();
+        raw.forEach((key, value) -> values.put(String.valueOf(key), value));
+        return validateFields(fields, values, false, "能力输出");
+    }
+
+    private String validateFields(Map<String, CapabilitySchemaField> fields, Map<String, Object> values,
+                                  boolean rejectUnknown, String label) {
+        if (rejectUnknown) {
+            for (String key : values.keySet()) if (!fields.containsKey(key)) return label + "包含未声明字段: " + key;
         }
         for (Map.Entry<String, CapabilitySchemaField> entry : fields.entrySet()) {
             Object value = values.get(entry.getKey());
             CapabilitySchemaField field = entry.getValue();
-            if (field.isRequired() && value == null) return "能力缺少必填参数: " + entry.getKey();
+            if (field.isRequired() && value == null) return label + "缺少必填字段: " + entry.getKey();
             if (value == null) continue;
-            String type = normalizeType(field.getType());
-            if (("integer".equals(type) || "number".equals(type)) && !(value instanceof Number))
-                return "能力参数类型错误: " + entry.getKey();
-            if ("boolean".equals(type) && !(value instanceof Boolean))
-                return "能力参数类型错误: " + entry.getKey();
-            if ("array".equals(type) && !(value instanceof List<?>))
-                return "能力参数类型错误: " + entry.getKey();
-            if ("object".equals(type) && !(value instanceof Map<?, ?>))
-                return "能力参数类型错误: " + entry.getKey();
-            if (field.getEnumValues() != null && !field.getEnumValues().isEmpty()
-                    && !field.getEnumValues().contains(String.valueOf(value)))
-                return "能力参数不在允许枚举中: " + entry.getKey();
-            if (value instanceof Number number) {
-                if (field.getMinimum() != null && number.doubleValue() < field.getMinimum())
-                    return "能力参数小于最小值: " + entry.getKey();
-                if (field.getMaximum() != null && number.doubleValue() > field.getMaximum())
-                    return "能力参数大于最大值: " + entry.getKey();
-            }
-            if (value instanceof String text) {
-                if (field.getMinLength() != null && text.length() < field.getMinLength())
-                    return "能力参数长度不足: " + entry.getKey();
-                if (field.getMaxLength() != null && text.length() > field.getMaxLength())
-                    return "能力参数长度超限: " + entry.getKey();
-            }
+            String issue = validateValue(entry.getKey(), field, value, label);
+            if (issue != null) return issue;
         }
         return null;
+    }
+
+    private String validateValue(String name, CapabilitySchemaField field, Object value, String label) {
+        String type = normalizeType(field.getType());
+        if ("string".equals(type) && !(value instanceof String)) return label + "字段类型错误: " + name;
+        if (("integer".equals(type) || "number".equals(type)) && !(value instanceof Number)) return label + "字段类型错误: " + name;
+        if ("boolean".equals(type) && !(value instanceof Boolean)) return label + "字段类型错误: " + name;
+        if ("array".equals(type) && !(value instanceof List<?>)) return label + "字段类型错误: " + name;
+        if ("object".equals(type) && !isObjectValue(value)) return label + "字段类型错误: " + name;
+        if (field.getEnumValues() != null && !field.getEnumValues().isEmpty()
+                && !field.getEnumValues().contains(String.valueOf(value))) return label + "字段不在允许枚举中: " + name;
+        if (value instanceof Number number) {
+            if (field.getMinimum() != null && number.doubleValue() < field.getMinimum()) return label + "字段小于最小值: " + name;
+            if (field.getMaximum() != null && number.doubleValue() > field.getMaximum()) return label + "字段大于最大值: " + name;
+        }
+        if (value instanceof String text) {
+            if (field.getMinLength() != null && text.length() < field.getMinLength()) return label + "字段长度不足: " + name;
+            if (field.getMaxLength() != null && text.length() > field.getMaxLength()) return label + "字段长度超限: " + name;
+        }
+        return null;
+    }
+
+    private boolean isObjectValue(Object value) {
+        return value instanceof Map<?, ?> || value != null
+                && !(value instanceof String) && !(value instanceof Number)
+                && !(value instanceof Boolean) && !(value instanceof List<?>)
+                && !value.getClass().isArray() && !value.getClass().isEnum();
     }
 
     private String normalizeType(String value) {

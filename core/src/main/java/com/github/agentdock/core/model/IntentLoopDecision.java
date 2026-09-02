@@ -6,7 +6,7 @@ import java.util.List;
 /** 单个意图每轮由 LLM 返回的结构化决策。 */
 @Data
 public class IntentLoopDecision {
-    public enum Status { CONTINUE, COMPLETED, UNRESOLVABLE }
+    public enum Status { CONTINUE, COMPLETED, WAITING_USER, UNRESOLVABLE }
     private Status status;
     private List<CapabilityInvocation> toolInvocations = List.of();
     private String result;

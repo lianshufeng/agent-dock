@@ -186,7 +186,9 @@ public class AiExecutionEngine {
             result = intentLoopExecutor.execute(intent, context);
         }
         log.info("AI 意图执行完成 executionId={}, intentId={}, status={}", conversation.getExecutionId(), intent.getId(), result.getStatus());
-        publish(conversation, intent.getId(), result.getStatus() == IntentStatus.SUCCESS ? AiEventType.TASK_SUCCESS : AiEventType.TASK_FAILED,
+        AiEventType terminalEvent = result.getStatus() == IntentStatus.SUCCESS ? AiEventType.TASK_SUCCESS
+                : result.getStatus() == IntentStatus.WAITING_USER ? AiEventType.WAITING_USER : AiEventType.TASK_FAILED;
+        publish(conversation, intent.getId(), terminalEvent,
                 result.getMessage() == null ? "执行完成" : result.getMessage(), 80);
         return result;
     }

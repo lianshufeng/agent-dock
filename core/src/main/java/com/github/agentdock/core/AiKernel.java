@@ -12,6 +12,8 @@ import com.github.agentdock.core.intent.IntentFactory;
 import com.github.agentdock.core.intent.IntentRegistry;
 import com.github.agentdock.core.intent.LlmIntentAnalyzer;
 import com.github.agentdock.core.intent.ContextRecallPolicy;
+import com.github.agentdock.core.intent.IntentAnalysisFallback;
+import com.github.agentdock.core.intent.IntentAnalysisPostProcessor;
 import com.github.agentdock.core.model.ConversationContext;
 import com.github.agentdock.core.model.ConversationResult;
 import com.github.agentdock.core.model.IntentDefinition;
@@ -114,6 +116,16 @@ public final class AiKernel {
 
     public AiKernel registerContextRecallPolicy(ContextRecallPolicy policy) {
         intentFactory.setContextRecallPolicy(policy);
+        return this;
+    }
+
+    public AiKernel registerIntentAnalysisPostProcessor(IntentAnalysisPostProcessor postProcessor) {
+        intentFactory.addPostProcessor(java.util.Objects.requireNonNull(postProcessor, "意图后处理器不能为空"));
+        return this;
+    }
+
+    public AiKernel registerIntentAnalysisFallback(IntentAnalysisFallback fallback) {
+        intentFactory.addFallback(java.util.Objects.requireNonNull(fallback, "意图分析兜底不能为空"));
         return this;
     }
 

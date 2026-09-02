@@ -26,6 +26,9 @@ public class CapabilityDefinition {
     private boolean compensatable;
     /** 成功结果是否已可直接作为当前意图最终结果，避免无意义的下一轮规划。 */
     private boolean terminalResult;
+    /** 宿主声明的能力风险和规划自由度；核心只执行通用约束，不解释业务编码。 */
+    private CapabilityRiskLevel riskLevel = CapabilityRiskLevel.READ_ONLY;
+    private CapabilityExecutionMode executionMode = CapabilityExecutionMode.AGENT;
     /** 单次调用超时时间。 */
     private Duration timeout;
     /** 主能力失败后的最大重试次数。 */
@@ -41,6 +44,7 @@ public class CapabilityDefinition {
         this.inputSchema=inputSchema==null?Map.of():Map.copyOf(inputSchema);
         this.outputSchema=outputSchema==null?Map.of():Map.copyOf(outputSchema);
         this.sideEffect=sideEffect;this.idempotent=idempotent;this.compensatable=compensatable;
+        this.riskLevel=sideEffect ? CapabilityRiskLevel.REVERSIBLE_WRITE : CapabilityRiskLevel.READ_ONLY;
         this.timeout=timeout==null?Duration.ofSeconds(30):timeout;this.maxRetries=Math.max(maxRetries,0);
         this.fallbackCapabilities=fallbackCapabilities==null?List.of():List.copyOf(fallbackCapabilities);
     }
@@ -51,9 +55,28 @@ public class CapabilityDefinition {
     }
 
     public Map<String, CapabilitySchemaField> effectiveInputContract() {
-        if (inputContract != null && !inputContract.isEmpty()) return inputContract;
+        return effectiveContract(inputContract, inputSchema);
+    }
+
+    public CapabilityDefinition risk(CapabilityRiskLevel value) {
+        this.riskLevel = value == null ? CapabilityRiskLevel.READ_ONLY : value;
+        return this;
+    }
+
+    public CapabilityDefinition executionMode(CapabilityExecutionMode value) {
+        this.executionMode = value == null ? CapabilityExecutionMode.AGENT : value;
+        return this;
+    }
+
+    public Map<String, CapabilitySchemaField> effectiveOutputContract() {
+        return effectiveContract(outputContract, outputSchema);
+    }
+
+    private Map<String, CapabilitySchemaField> effectiveContract(Map<String, CapabilitySchemaField> typedContract,
+                                                                  Map<String, String> legacySchema) {
+        if (typedContract != null && !typedContract.isEmpty()) return typedContract;
         Map<String, CapabilitySchemaField> result = new java.util.LinkedHashMap<>();
-        if (inputSchema != null) inputSchema.forEach((name, type) -> {
+        if (legacySchema != null) legacySchema.forEach((name, type) -> {
             String value = type == null ? "string" : type.trim();
             if (value.toLowerCase(java.util.Locale.ROOT).startsWith("enum:")) {
                 CapabilitySchemaField field = new CapabilitySchemaField("string", false);
