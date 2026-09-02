@@ -13,19 +13,25 @@ public final class AiExecutionContext {
     private Object currentTaskObservation;
     /** 按意图 ID 保存已完成结果，供后续意图读取依赖输出。 */
     private final Map<String, IntentResult> results;
+    /** 按意图 ID 保存最近一次任务验收结论，供计划级重规划读取。 */
+    private final Map<String, TaskVerification> verifications;
 
     public AiExecutionContext() {
         this.results = new ConcurrentHashMap<>();
+        this.verifications = new ConcurrentHashMap<>();
     }
 
     public AiExecutionContext(ConversationContext conversation) {
         this.conversation = conversation;
         this.results = new ConcurrentHashMap<>();
+        this.verifications = new ConcurrentHashMap<>();
     }
 
-    private AiExecutionContext(ConversationContext conversation, Map<String, IntentResult> results) {
+    private AiExecutionContext(ConversationContext conversation, Map<String, IntentResult> results,
+                               Map<String, TaskVerification> verifications) {
         this.conversation = conversation;
         this.results = results;
+        this.verifications = verifications;
     }
 
     /** 返回只读结果视图，避免能力实现破坏执行链状态。 */
@@ -38,8 +44,20 @@ public final class AiExecutionContext {
         results.put(result.getIntentId(), result);
     }
 
+    public void removeResult(String intentId) {
+        if (intentId != null) results.remove(intentId);
+    }
+
+    public Map<String, TaskVerification> getVerifications() {
+        return Collections.unmodifiableMap(verifications);
+    }
+
+    public void addVerification(String intentId, TaskVerification verification) {
+        if (intentId != null && verification != null) verifications.put(intentId, verification);
+    }
+
     /** 为单个意图创建独占的执行上下文，避免并行任务互相覆盖临时状态。 */
     public AiExecutionContext forkForIntent() {
-        return new AiExecutionContext(conversation, results);
+        return new AiExecutionContext(conversation, results, verifications);
     }
 }

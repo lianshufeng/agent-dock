@@ -9,6 +9,7 @@ import com.github.agentdock.core.event.*;
 import com.github.agentdock.core.type.AiEventType;
 import com.github.agentdock.core.type.IntentStatus;
 import com.github.agentdock.core.task.*;
+import com.github.agentdock.core.context.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -58,8 +59,9 @@ public final class IntentLoopExecutor {
     private final CapabilityInvocationBinder invocationBinder = new CapabilityInvocationBinder();
     private final TaskPlanner taskPlanner;
     private final CapabilityOutputCombiner outputCombiner;
-    private final TaskVerifier taskVerifier = new DefaultTaskVerifier();
-    private final TaskReplanner taskReplanner = new NoopTaskReplanner();
+    private final TaskVerifier taskVerifier;
+    private final TaskReplanner taskReplanner;
+    private final ContextAssembler contextAssembler;
 
     public IntentLoopExecutor(IntentLoopPlanner planner, CapabilityRegistry capabilities, ChatHistoryStore historyStore) {
         this(planner, capabilities, historyStore, new DefaultCapabilityResolver(),
@@ -100,6 +102,18 @@ public final class IntentLoopExecutor {
                               AiEventPublisher events, TaskPlanner taskPlanner,
                               CapabilityOutputCombiner outputCombiner,
                               CapabilityCandidateSelector capabilityCandidateSelector) {
+        this(planner, capabilities, historyStore, capabilityResolver, capabilityInvoker, events, taskPlanner,
+                outputCombiner, capabilityCandidateSelector, new DefaultContextAssembler(),
+                new DefaultTaskVerifier(), new NoopTaskReplanner());
+    }
+
+    public IntentLoopExecutor(IntentLoopPlanner planner, CapabilityRegistry capabilities, ChatHistoryStore historyStore,
+                              CapabilityResolver capabilityResolver, CapabilityInvoker capabilityInvoker,
+                              AiEventPublisher events, TaskPlanner taskPlanner,
+                              CapabilityOutputCombiner outputCombiner,
+                              CapabilityCandidateSelector capabilityCandidateSelector,
+                              ContextAssembler contextAssembler, TaskVerifier taskVerifier,
+                              TaskReplanner taskReplanner) {
         this.planner = planner;
         this.capabilities = capabilities;
         this.historyStore = historyStore;
@@ -110,6 +124,9 @@ public final class IntentLoopExecutor {
         this.events = events;
         this.taskPlanner = taskPlanner == null ? new DefaultTaskPlanner() : taskPlanner;
         this.outputCombiner = outputCombiner == null ? new DefaultCapabilityOutputCombiner() : outputCombiner;
+        this.contextAssembler = contextAssembler == null ? new DefaultContextAssembler() : contextAssembler;
+        this.taskVerifier = taskVerifier == null ? new DefaultTaskVerifier() : taskVerifier;
+        this.taskReplanner = taskReplanner == null ? new NoopTaskReplanner() : taskReplanner;
     }
 
     public IntentResult execute(IntentCandidate intent, AiExecutionContext context) {
@@ -127,7 +144,10 @@ public final class IntentLoopExecutor {
         int[] counts = new int[3];
         try {
             IntentResult result = executeInternal(intent, task, context, counts);
+            publish(context, intent, AiEventType.VERIFICATION_STARTED, "正在验收任务结果", 76,
+                    payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria()));
             TaskVerification verification = taskVerifier.verify(task, result, context);
+            context.addVerification(intent.getId(), verification);
             if (!verification.isPassed() && verification.isReplanRequired()) {
                 java.util.Optional<Task> replanned = taskReplanner.replan(task, verification, context);
                 if (replanned.isPresent()) {
@@ -136,6 +156,7 @@ public final class IntentLoopExecutor {
                                     "reason", verification.getMessage() == null ? "结果未通过检查" : verification.getMessage()));
                     IntentResult retryResult = executeInternal(intent, replanned.get(), context, counts);
                     TaskVerification retryVerification = taskVerifier.verify(replanned.get(), retryResult, context);
+                    context.addVerification(intent.getId(), retryVerification);
                     if (retryVerification.isPassed()) {
                         result = retryResult;
                         verification = retryVerification;
@@ -149,7 +170,18 @@ public final class IntentLoopExecutor {
                             : "任务结果检查未通过：" + verification.getMessage(), 78,
                     payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria(),
                             "passed", verification.isPassed(), "replanRequired", verification.isReplanRequired()));
-            return result;
+            publish(context, intent, verification.isPassed() ? AiEventType.VERIFICATION_PASSED : AiEventType.VERIFICATION_FAILED,
+                    verification.isPassed() ? "任务结果验收通过" : "任务结果验收未通过：" + verification.getMessage(), 78,
+                    payload("taskId", task.getId(), "action", verification.getAction(),
+                            "evidence", verification.getEvidence()));
+            if (verification.isPassed()) return result;
+            String message = verification.getMessage() == null || verification.getMessage().isBlank()
+                    ? "任务结果未通过验收" : verification.getMessage();
+            if (verification.getAction() == VerificationAction.WAITING_USER
+                    || verification.getAction() == VerificationAction.MANUAL_REVIEW) {
+                return IntentResult.waitingUser(intent, message);
+            }
+            return IntentResult.failed(intent, message);
         } finally {
             publish(context, intent, AiEventType.INTENT_METRICS,
                     "任务执行完成：规划 " + counts[0] + " 次，调用工具 " + counts[1] + " 次", 80,
@@ -229,6 +261,10 @@ public final class IntentLoopExecutor {
                     .collect(java.util.stream.Collectors.toUnmodifiableSet());
             request.setCapabilities(iterationCapabilities);
             request.setIteration(iteration);
+            ContextSnapshot planningContext = contextSnapshot(ContextPhase.TASK_PLANNING, context, intent, task,
+                    dependencies, observations, iterationCapabilities, null);
+            request.setContextSnapshot(planningContext);
+            publishContext(context, intent, planningContext);
             IntentLoopDecision decision;
             try {
                 counts[0]++;
@@ -246,7 +282,9 @@ public final class IntentLoopExecutor {
             if (decision.getStatus() == IntentLoopDecision.Status.COMPLETED) {
                 boolean hasSuccessfulDependency = !dependencies.isEmpty() && dependencies.values().stream()
                         .allMatch(result -> result != null && result.getStatus() == IntentStatus.SUCCESS);
-                if (observations.isEmpty() && !hasSuccessfulDependency) {
+                boolean hasHistoryEvidence = !history.isEmpty()
+                        && decision.getResult() != null && !decision.getResult().isBlank();
+                if (observations.isEmpty() && !hasSuccessfulDependency && !hasHistoryEvidence) {
                     return IntentResult.failed(intent, "缺少成功工具调用或前置结果，不能直接声明任务已完成");
                 }
                 if (!observations.isEmpty() && !observations.get(observations.size() - 1).getResult().isSuccess()) {
@@ -401,6 +439,10 @@ public final class IntentLoopExecutor {
         request.setCapabilities(List.of());
         request.setIteration(MAX_ITERATIONS);
         request.setFinalizing(true);
+        ContextSnapshot summaryContext = contextSnapshot(ContextPhase.RESULT_SUMMARY, context, intent, null,
+                dependencies, successful, List.of(), null);
+        request.setContextSnapshot(summaryContext);
+        publishContext(context, intent, summaryContext);
         try {
             counts[0]++;
             IntentLoopDecision decision = decide(request, Instant.now().plusSeconds(30));
@@ -415,6 +457,33 @@ public final class IntentLoopExecutor {
         } catch (RuntimeException exception) {
             return IntentResult.failed(intent, "最终结果归纳失败: " + exception.getMessage());
         }
+    }
+
+    private ContextSnapshot contextSnapshot(ContextPhase phase, AiExecutionContext context, IntentCandidate intent,
+                                            Task task, Map<String, IntentResult> dependencies,
+                                            List<AgentObservation> observations,
+                                            List<CapabilityDefinition> capabilities,
+                                            TaskVerification verification) {
+        ContextRequest request = new ContextRequest();
+        request.setPhase(phase);
+        request.setConversation(context.getConversation());
+        request.setIntent(intent);
+        request.setTask(task);
+        request.setPreviousIntentResults(dependencies == null ? Map.of() : dependencies);
+        request.setObservations(observations == null ? List.of() : observations);
+        request.setCapabilities(capabilities == null ? List.of() : capabilities);
+        request.setVerification(verification);
+        return contextAssembler.assemble(request);
+    }
+
+    private void publishContext(AiExecutionContext context, IntentCandidate intent, ContextSnapshot snapshot) {
+        publish(context, intent, AiEventType.CONTEXT_ASSEMBLED,
+                "已为当前阶段构造受控上下文", 34,
+                payload("phase", snapshot.getPhase(), "itemCount", snapshot.getItems().size(),
+                        "estimatedTokens", snapshot.getEstimatedTokens(), "truncatedItems", snapshot.getTruncatedItems()));
+        if (snapshot.getTruncatedItems() > 0) publish(context, intent, AiEventType.CONTEXT_TRUNCATED,
+                "上下文超出预算，已保留高优先级证据并裁剪其余内容", 34,
+                payload("phase", snapshot.getPhase(), "truncatedItems", snapshot.getTruncatedItems()));
     }
 
     private void publish(AiExecutionContext context, IntentCandidate intent, AiEventType type,
@@ -488,12 +557,13 @@ public final class IntentLoopExecutor {
     }
 
     private List<ConversationMessage> loadHistory(IntentCandidate intent, AiExecutionContext context) {
-        if (!intent.getContextRequirement().isRecallHistory()
-                || context.getConversation() == null) {
+        ContextRequirement requirement = intent.getContextRequirement();
+        boolean historyRequested = requirement.isRecallHistory()
+                || requirement.getScopes().contains("CONVERSATION_HISTORY");
+        if (!historyRequested || context.getConversation() == null) {
             return List.of();
         }
-        int limit = Math.min(Math.max(intent.getContextRequirement().getHistoryLimit(), 0), 50);
-        if (limit == 0) return List.of();
+        int limit = Math.min(requirement.getHistoryLimit() > 0 ? requirement.getHistoryLimit() : 20, 50);
         List<ConversationMessage> existing = context.getConversation().getHistory();
         if (existing != null && existing.size() >= limit) {
             return existing.subList(Math.max(0, existing.size() - limit), existing.size());

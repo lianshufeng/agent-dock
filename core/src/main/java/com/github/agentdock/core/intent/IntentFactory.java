@@ -2,6 +2,7 @@ package com.github.agentdock.core.intent;
 
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.type.IntentComplexity;
+import com.github.agentdock.core.context.*;
 import java.util.*;
 
 /** 多意图工厂：收集适配器结果，合并上下文要求并生成串行队列顺序。 */
@@ -11,6 +12,7 @@ public class IntentFactory {
     /** 兼容旧宿主注册入口；通用内核不再依赖业务意图适配器。 */
     private final IntentRegistry intentRegistry;
     private LlmIntentAnalyzer analyzer;
+    private ContextAssembler contextAssembler = new DefaultContextAssembler();
     private ContextRecallPolicy contextRecallPolicy = ContextRecallPolicy.noop();
     private final List<IntentAnalysisPostProcessor> postProcessors = new ArrayList<>();
     private final List<IntentAnalysisFallback> fallbacks = new ArrayList<>();
@@ -33,6 +35,10 @@ public class IntentFactory {
         this.analyzer = analyzer;
     }
 
+    public void setContextAssembler(ContextAssembler contextAssembler) {
+        this.contextAssembler = contextAssembler == null ? new DefaultContextAssembler() : contextAssembler;
+    }
+
     public void setContextRecallPolicy(ContextRecallPolicy contextRecallPolicy) {
         this.contextRecallPolicy = contextRecallPolicy == null ? ContextRecallPolicy.noop() : contextRecallPolicy;
     }
@@ -45,13 +51,21 @@ public class IntentFactory {
         if (fallback != null) fallbacks.add(fallback);
     }
 
+    public List<IntentDefinition> intentDefinitions() {
+        return intentRegistry.definitions();
+    }
+
     /** 汇总全部通用意图，一次调用 LLM，再生成按依赖关系和优先级排序的串行计划。 */
     public IntentAnalysis analyze(ConversationContext context) {
         String intentCatalog = buildIntentCatalog();
         IntentAdapterResult analysis;
         RuntimeException analysisFailure = null;
         try {
-            analysis = Optional.ofNullable(analyzer == null ? null : analyzer.analyze(context, intentCatalog))
+            ContextRequest contextRequest = new ContextRequest();
+            contextRequest.setPhase(ContextPhase.INTENT_ANALYSIS);
+            contextRequest.setConversation(context);
+            ContextSnapshot snapshot = contextAssembler.assemble(contextRequest);
+            analysis = Optional.ofNullable(analyzer == null ? null : analyzer.analyze(context, intentCatalog, snapshot))
                     .orElse(IntentAdapterResult.empty());
         } catch (RuntimeException exception) {
             analysisFailure = exception;

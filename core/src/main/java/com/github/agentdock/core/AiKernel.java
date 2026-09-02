@@ -23,6 +23,14 @@ import com.github.agentdock.core.loop.IntentLoopPlanner;
 import com.github.agentdock.core.task.TaskPlanner;
 import com.github.agentdock.core.provider.ModelUsageRecorder;
 import com.github.agentdock.core.provider.NoopModelUsageRecorder;
+import com.github.agentdock.core.context.ContextAssembler;
+import com.github.agentdock.core.context.DefaultContextAssembler;
+import com.github.agentdock.core.task.TaskVerifier;
+import com.github.agentdock.core.task.DefaultTaskVerifier;
+import com.github.agentdock.core.task.TaskReplanner;
+import com.github.agentdock.core.task.NoopTaskReplanner;
+import com.github.agentdock.core.planning.PlanReplanner;
+import com.github.agentdock.core.planning.NoopPlanReplanner;
 
 /**
  * AI 内核的自管理入口。业务项目只需注册自己的适配器和能力，不需要依赖 Spring。
@@ -43,6 +51,10 @@ public final class AiKernel {
     private ResultSummarizer resultSummarizer = new DefaultResultSummarizer();
     private CapabilityOutputCombiner capabilityOutputCombiner = new DefaultCapabilityOutputCombiner();
     private ModelUsageRecorder modelUsageRecorder = NoopModelUsageRecorder.INSTANCE;
+    private ContextAssembler contextAssembler = new DefaultContextAssembler();
+    private TaskVerifier taskVerifier = new DefaultTaskVerifier();
+    private TaskReplanner taskReplanner = new NoopTaskReplanner();
+    private PlanReplanner planReplanner = new NoopPlanReplanner();
     private AiExecutionMode executionMode = AiExecutionMode.SERIAL;
 
     public AiKernel registerExecutionMode(AiExecutionMode mode) {
@@ -67,6 +79,27 @@ public final class AiKernel {
 
     public AiKernel registerTaskPlanner(TaskPlanner planner) {
         this.taskPlanner = planner;
+        return this;
+    }
+
+    public AiKernel registerContextAssembler(ContextAssembler assembler) {
+        this.contextAssembler = java.util.Objects.requireNonNull(assembler, "上下文组装器不能为空");
+        this.intentFactory.setContextAssembler(assembler);
+        return this;
+    }
+
+    public AiKernel registerTaskVerifier(TaskVerifier verifier) {
+        this.taskVerifier = java.util.Objects.requireNonNull(verifier, "任务验收器不能为空");
+        return this;
+    }
+
+    public AiKernel registerTaskReplanner(TaskReplanner replanner) {
+        this.taskReplanner = java.util.Objects.requireNonNull(replanner, "任务重规划器不能为空");
+        return this;
+    }
+
+    public AiKernel registerPlanReplanner(PlanReplanner replanner) {
+        this.planReplanner = java.util.Objects.requireNonNull(replanner, "计划重规划器不能为空");
         return this;
     }
 
@@ -150,7 +183,8 @@ public final class AiKernel {
         return new AiExecutionEngine(intentFactory, new DefaultResultAggregator(), resultSummarizer, eventPublisher,
                 new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
                         capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
-                        capabilityCandidateSelector), chatHistoryStore, executionMode)
+                        capabilityCandidateSelector, contextAssembler, taskVerifier, taskReplanner),
+                chatHistoryStore, executionMode, planReplanner, contextAssembler)
                 .execute(context);
     }
 

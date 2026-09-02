@@ -1,5 +1,6 @@
 package com.github.agentdock.core.model;
 
+import com.github.agentdock.core.context.ContextSnapshot;
 import lombok.Data;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +15,8 @@ public class IntentLoopRequest {
     private List<AgentObservation> observations = List.of();
     private List<CapabilityDefinition> capabilities = List.of();
     private int iteration;
+    /** 由统一上下文工程生成，模型适配器应优先读取本快照。 */
+    private ContextSnapshot contextSnapshot = ContextSnapshot.EMPTY;
     /** 工具探索结束后，只允许基于已有真实观察归纳最终结果。 */
     private boolean finalizing;
 }

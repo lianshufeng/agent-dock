@@ -39,14 +39,9 @@ public final class LangChain4jIntentLoopPlanner implements IntentLoopPlanner {
                 %s
                 当前轮次：%d
                 当前是否为强制收敛阶段：%s
-                宿主提供的受限上下文：%s
-                用户输入：%s
-                当前附件：%s
+                统一受控上下文快照：%s
                 当前意图：%s
                 预期结果：%s
-                历史对话：%s
-                已完成的前置意图结果：%s
-                之前的能力调用观察：%s
                 当前意图允许使用的能力：%s
                 只能调用能力目录中的能力，arguments 必须遵守对应 inputSchema。
                 依赖前置意图的数据必须通过 inputRefs 显式引用。path 必须使用 RFC 6901 JSON Pointer，始终以 / 开头，例如 /output/items/0/id；禁止使用 output.items.0.id 或 output.items[0].id，禁止硬编码前置结果。
@@ -63,11 +58,9 @@ public final class LangChain4jIntentLoopPlanner implements IntentLoopPlanner {
                 宿主补充规则：
                 %s
                 """.formatted(IntentLoopContract.INSTANCE.promptDescription(), request.getIteration(), request.isFinalizing(),
-                json(request.getConversation() == null ? java.util.Map.of() : request.getConversation().getAttributes()),
-                text(request.getConversation() == null ? null : request.getConversation().getUserInput()),
-                attachmentSummary(request.getConversation()),
+                json(request.getContextSnapshot() == null ? java.util.List.of()
+                        : request.getContextSnapshot().promptItems()),
                 json(request.getIntent()), text(request.getIntent() == null ? null : request.getIntent().getExpectedResult()),
-                json(request.getHistory()), json(request.getPreviousIntentResults()), json(request.getObservations()),
                 json(request.getCapabilities()), contributedRules(request)).strip();
         try {
             log.info("AI 发起 Loop 规划 executionId={}, intentId={}, iteration={}",

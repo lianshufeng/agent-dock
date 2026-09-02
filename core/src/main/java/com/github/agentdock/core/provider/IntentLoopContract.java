@@ -11,7 +11,7 @@ public final class IntentLoopContract implements StructuredOutputContract {
 
     private final Map<SchemaField, SchemaObjectValue> fields = new LinkedHashMap<>() {{
         put(new SchemaField("status", "当前意图本轮执行状态"),
-                new SchemaEnumValue("只能返回指定枚举值", "CONTINUE", "COMPLETED", "UNRESOLVABLE"));
+                new SchemaEnumValue("只能返回指定枚举值", "CONTINUE", "COMPLETED", "WAITING_USER", "UNRESOLVABLE"));
         put(new SchemaField("completeAfterTools", "本轮所有工具成功后是否已满足当前意图预期结果"),
                 new SchemaBooleanValue("只有本轮全部工具声明 terminalResult 且无需继续分析或调用时才为 true"));
         put(new SchemaField("toolInvocations", "状态为 CONTINUE 时需要执行的工具调用"),

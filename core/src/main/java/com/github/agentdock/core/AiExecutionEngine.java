@@ -10,11 +10,14 @@ import com.github.agentdock.core.store.ChatHistoryStore;
 import com.github.agentdock.core.type.*;
 import com.github.agentdock.core.routing.ExecutionRouter;
 import com.github.agentdock.core.routing.impl.DefaultExecutionRouter;
+import com.github.agentdock.core.planning.*;
+import com.github.agentdock.core.context.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,6 +54,10 @@ public class AiExecutionEngine {
     private final AiEventPublisher events;
     private final ExecutionRouter executionRouter = new DefaultExecutionRouter();
     private final AiExecutionMode executionMode;
+    private final PlanReplanner planReplanner;
+    private final ContextAssembler contextAssembler;
+    private final PlanPatchApplier planPatchApplier = new PlanPatchApplier();
+    private static final int MAX_PLAN_VERSIONS = 4;
 
     public AiExecutionEngine(IntentFactory intentFactory, ResultAggregator aggregator, ResultSummarizer summarizer,
                              AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
@@ -61,6 +68,14 @@ public class AiExecutionEngine {
     public AiExecutionEngine(IntentFactory intentFactory, ResultAggregator aggregator, ResultSummarizer summarizer,
                              AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
                              ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode) {
+        this(intentFactory, aggregator, summarizer, events, intentLoopExecutor, chatHistoryStore, executionMode,
+                new NoopPlanReplanner(), new DefaultContextAssembler());
+    }
+
+    public AiExecutionEngine(IntentFactory intentFactory, ResultAggregator aggregator, ResultSummarizer summarizer,
+                             AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
+                             ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode,
+                             PlanReplanner planReplanner, ContextAssembler contextAssembler) {
         this.intentFactory = intentFactory;
         this.aggregator = aggregator;
         this.summarizer = summarizer;
@@ -68,6 +83,8 @@ public class AiExecutionEngine {
         this.intentLoopExecutor = intentLoopExecutor;
         this.chatHistoryStore = chatHistoryStore;
         this.executionMode = executionMode == null ? AiExecutionMode.SERIAL : executionMode;
+        this.planReplanner = planReplanner == null ? new NoopPlanReplanner() : planReplanner;
+        this.contextAssembler = contextAssembler == null ? new DefaultContextAssembler() : contextAssembler;
     }
 
     /** 按已经排序的意图队列串行执行，并持续发布可供 SSE 转发的状态事件。 */
@@ -115,26 +132,31 @@ public class AiExecutionEngine {
         }
         AiExecutionContext context = new AiExecutionContext(conversation);
         List<IntentResult> results = new ArrayList<>();
-        Map<String, IntentCandidate> pending = new LinkedHashMap<>();
-        analysis.getOrderedIntents().forEach(intent -> pending.put(intent.getId(), intent));
-        while (!pending.isEmpty()) {
-            List<IntentCandidate> ready = pending.values().stream()
-                    .filter(intent -> intent.getDependsOn().stream().allMatch(id -> context.getResults().containsKey(id)))
+        ExecutionPlan plan = ExecutionPlan.from(conversation.getExecutionId(), analysis.getOrderedIntents());
+        while (!plan.pendingNodes().isEmpty()) {
+            List<PlanNode> readyNodes = plan.readyNodes().stream()
                     .limit(executionMode == AiExecutionMode.PARALLEL ? MAX_EXECUTION_CONCURRENCY : 1)
                     .toList();
-            if (ready.isEmpty()) {
-                // 理论上环已在 IntentFactory 拒绝；这里防止异常依赖导致调度器死锁。
-                ready = List.of(pending.values().iterator().next());
+            if (readyNodes.isEmpty()) {
+                PlanNode deadlocked = plan.pendingNodes().get(0);
+                deadlocked.setStatus(PlanNodeStatus.FAILED);
+                IntentResult failed = IntentResult.failed(deadlocked.getIntent(), "执行计划没有可运行节点");
+                context.addResult(failed);
+                replaceResult(results, failed);
+                continue;
             }
             Map<String, CompletableFuture<IntentResult>> running = new LinkedHashMap<>();
-            for (IntentCandidate intent : ready) {
-                pending.remove(intent.getId());
+            for (PlanNode node : readyNodes) {
+                node.setStatus(PlanNodeStatus.RUNNING);
+                IntentCandidate intent = node.getIntent();
                 try {
-                    running.put(intent.getId(), CompletableFuture.supplyAsync(() -> executeIntent(intent, analysis, context, results.size()), DAG_EXECUTOR));
+                    running.put(intent.getId(), CompletableFuture.supplyAsync(() ->
+                            executeIntent(intent, plan.orderedIntents().size(), context, results.size()), DAG_EXECUTOR));
                 } catch (RejectedExecutionException exception) {
                     IntentResult rejected = IntentResult.failed(intent, "AI 执行资源已满，请稍后重试");
                     context.addResult(rejected);
-                    results.add(rejected);
+                    replaceResult(results, rejected);
+                    node.setStatus(PlanNodeStatus.FAILED);
                 }
             }
             running.forEach((id, future) -> {
@@ -142,16 +164,19 @@ public class AiExecutionEngine {
                 try {
                     result = future.join();
                 } catch (RuntimeException exception) {
-                    IntentCandidate intent = analysis.getOrderedIntents().stream().filter(item -> item.getId().equals(id)).findFirst().orElse(null);
+                    IntentCandidate intent = plan.getNodes().get(id) == null ? null : plan.getNodes().get(id).getIntent();
                     result = intent == null ? null : IntentResult.failed(intent, exception.getMessage());
                 }
                 if (result != null) {
                     context.addResult(result);
-                    results.add(result);
+                    replaceResult(results, result);
+                    PlanNode node = plan.getNodes().get(id);
+                    node.setStatus(toNodeStatus(result));
+                    attemptReplan(plan, node, result, context, results);
                 }
             });
         }
-        results.sort(java.util.Comparator.comparingInt(result -> analysis.getOrderedIntents().stream()
+        results.sort(java.util.Comparator.comparingInt(result -> plan.orderedIntents().stream()
                 .map(IntentCandidate::getId).toList().indexOf(result.getIntentId())));
         ConversationResult finalResult = aggregator.aggregate(results);
         finalResult.setMessage(summarizer.summarize(conversation, finalResult));
@@ -162,7 +187,7 @@ public class AiExecutionEngine {
         return finalResult;
     }
 
-    private IntentResult executeIntent(IntentCandidate intent, IntentAnalysis analysis,
+    private IntentResult executeIntent(IntentCandidate intent, int intentTotal,
                                        AiExecutionContext sharedContext, int completedCount) {
         AiExecutionContext context = sharedContext.forkForIntent();
         ConversationContext conversation = context.getConversation();
@@ -173,7 +198,7 @@ public class AiExecutionEngine {
                 java.util.Map.of("route", route.name(), "dependsOn", intent.getDependsOn()));
         publish(conversation, intent.getId(), AiEventType.TASK_STARTED,
                 "开始任务：" + displayText(intent.getDescription(), intent.getProgressText()), 20,
-                java.util.Map.of("intentIndex", completedCount + 1, "intentTotal", analysis.getOrderedIntents().size(),
+                java.util.Map.of("intentIndex", completedCount + 1, "intentTotal", intentTotal,
                         "progressText", displayText(intent.getProgressText(), "正在处理"),
                         "objective", displayText(intent.getDescription(), intent.getProgressText()),
                         "expectedResult", displayText(intent.getExpectedResult(), "完成当前任务")));
@@ -191,6 +216,75 @@ public class AiExecutionEngine {
         publish(conversation, intent.getId(), terminalEvent,
                 result.getMessage() == null ? "执行完成" : result.getMessage(), 80);
         return result;
+    }
+
+    private void attemptReplan(ExecutionPlan plan, PlanNode node, IntentResult result,
+                               AiExecutionContext context, List<IntentResult> results) {
+        TaskVerification verification = context.getVerifications().get(node.getId());
+        if (verification == null || verification.getAction() != VerificationAction.REPLAN
+                || plan.getVersion() >= MAX_PLAN_VERSIONS) return;
+        publish(context.getConversation(), node.getId(), AiEventType.REPLAN_REQUESTED,
+                "任务验收未通过，正在调整后续执行计划", 79,
+                Map.of("planVersion", plan.getVersion(), "reason", displayText(verification.getMessage(), "验收未通过")));
+        ContextRequest contextRequest = new ContextRequest();
+        contextRequest.setPhase(ContextPhase.TASK_REPLANNING);
+        contextRequest.setConversation(context.getConversation());
+        contextRequest.setIntent(node.getIntent());
+        contextRequest.setPreviousIntentResults(context.getResults());
+        contextRequest.setVerification(verification);
+        contextRequest.setExecutionPlan(plan);
+        PlanReplanRequest request = new PlanReplanRequest();
+        request.setPlan(plan);
+        request.setFailedNode(node);
+        request.setResult(result);
+        request.setVerification(verification);
+        request.setConversation(context.getConversation());
+        request.setAllowedIntents(intentFactory.intentDefinitions());
+        request.setContextSnapshot(contextAssembler.assemble(contextRequest));
+        java.util.Optional<PlanPatch> proposed = planReplanner.replan(request);
+        if (proposed.isEmpty()) return;
+        PlanPatch patch = proposed.get();
+        publish(context.getConversation(), node.getId(), AiEventType.PLAN_PATCH_PROPOSED,
+                "已生成计划调整方案", 79, Map.of("planVersion", plan.getVersion(), "patch", patch));
+        try {
+            Set<String> allowedCodes = intentFactory.intentDefinitions().stream()
+                    .map(IntentDefinition::getCode).collect(java.util.stream.Collectors.toSet());
+            Set<String> resetIds = planPatchApplier.apply(plan, patch, allowedCodes, MAX_PLAN_VERSIONS);
+            patch.getOperations().forEach(operation -> {
+                if (operation.getType() == PlanPatchType.REPLACE_NODE) {
+                    publish(context.getConversation(), operation.getTargetNodeId(), AiEventType.NODE_REPLACED,
+                            "已替换未通过验收的计划节点", 79);
+                } else if (operation.getType() == PlanPatchType.CANCEL_NODE) {
+                    publish(context.getConversation(), operation.getTargetNodeId(), AiEventType.NODE_CANCELLED,
+                            "已取消不再需要的计划节点", 79);
+                }
+            });
+            resetIds.forEach(id -> {
+                context.removeResult(id);
+                results.removeIf(item -> id.equals(item.getIntentId()));
+            });
+            publish(context.getConversation(), node.getId(), AiEventType.PLAN_VERSION_CREATED,
+                    "执行计划已更新为版本 " + plan.getVersion(), 79,
+                    Map.of("planVersion", plan.getVersion(), "resetNodeIds", resetIds));
+        } catch (IllegalArgumentException exception) {
+            publish(context.getConversation(), node.getId(), AiEventType.PLAN_PATCH_REJECTED,
+                    "计划调整被拒绝：" + exception.getMessage(), 79,
+                    Map.of("planVersion", plan.getVersion(), "reason", exception.getMessage()));
+        }
+    }
+
+    private void replaceResult(List<IntentResult> results, IntentResult value) {
+        results.removeIf(item -> value.getIntentId().equals(item.getIntentId()));
+        results.add(value);
+    }
+
+    private PlanNodeStatus toNodeStatus(IntentResult result) {
+        return switch (result.getStatus()) {
+            case SUCCESS -> PlanNodeStatus.SUCCESS;
+            case WAITING_USER -> PlanNodeStatus.WAITING_USER;
+            case SKIPPED -> PlanNodeStatus.SKIPPED;
+            default -> PlanNodeStatus.FAILED;
+        };
     }
 
     private void appendAssistant(ConversationContext conversation, String message) {
