@@ -179,7 +179,8 @@ public final class IntentLoopExecutor {
                     ? "任务结果未通过验收" : verification.getMessage();
             if (verification.getAction() == VerificationAction.WAITING_USER
                     || verification.getAction() == VerificationAction.MANUAL_REVIEW) {
-                return IntentResult.waitingUser(intent, message);
+                return new IntentResult(intent.getId(), intent.getCode(), IntentStatus.WAITING_USER,
+                        result.getOutput(), message);
             }
             return IntentResult.failed(intent, message);
         } finally {
@@ -270,6 +271,11 @@ public final class IntentLoopExecutor {
                 counts[0]++;
                 decision = decide(request, deadline);
             } catch (RuntimeException exception) {
+                List<Object> successfulOutputs = observations.stream()
+                        .map(AgentObservation::getResult).filter(CapabilityResult::isSuccess)
+                        .map(CapabilityResult::getOutput).filter(java.util.Objects::nonNull).toList();
+                if (!successfulOutputs.isEmpty())
+                    return IntentResult.success(intent, outputCombiner.combine(intent, successfulOutputs));
                 return IntentResult.failed(intent, exception.getMessage());
             }
             if (decision == null) return IntentResult.failed(intent, "Loop 规划器未返回决策");
@@ -291,6 +297,15 @@ public final class IntentLoopExecutor {
                     return IntentResult.failed(intent, "最近一次工具调用失败，不能直接声明完成");
                 }
                 if (iteration > 0) counts[2] = 1;
+                if (!observations.isEmpty()) {
+                    List<Object> successfulOutputs = observations.stream()
+                            .map(AgentObservation::getResult)
+                            .filter(CapabilityResult::isSuccess)
+                            .map(CapabilityResult::getOutput)
+                            .filter(java.util.Objects::nonNull)
+                            .toList();
+                    return IntentResult.success(intent, outputCombiner.combine(intent, successfulOutputs));
+                }
                 return IntentResult.success(intent, decision.getResult());
             }
             if (decision.getStatus() == IntentLoopDecision.Status.UNRESOLVABLE) {
@@ -379,7 +394,7 @@ public final class IntentLoopExecutor {
                     }
                 }
             }
-            if (allTerminal && allSuccessful && (decision.getToolInvocations().size() == 1 || decision.isCompleteAfterTools())) {
+            if (allTerminal && allSuccessful && decision.isCompleteAfterTools()) {
                 return IntentResult.success(intent, outputCombiner.combine(intent, outputs));
             }
         }
@@ -450,12 +465,16 @@ public final class IntentLoopExecutor {
                     java.util.Map.of("iteration", MAX_ITERATIONS + 1, "finalizing", true, "decision", decision));
             if (decision != null && decision.getStatus() == IntentLoopDecision.Status.COMPLETED
                     && decision.getResult() != null && !decision.getResult().isBlank())
-                return IntentResult.success(intent, decision.getResult());
+                return IntentResult.success(intent, outputCombiner.combine(intent, successful.stream()
+                        .map(AgentObservation::getResult).map(CapabilityResult::getOutput)
+                        .filter(java.util.Objects::nonNull).toList()));
             String message = decision != null && decision.getReason() != null && !decision.getReason().isBlank()
                     ? decision.getReason() : reason + "，已有结果不足以满足任务目标";
             return IntentResult.failed(intent, message);
         } catch (RuntimeException exception) {
-            return IntentResult.failed(intent, "最终结果归纳失败: " + exception.getMessage());
+            return IntentResult.success(intent, outputCombiner.combine(intent, successful.stream()
+                    .map(AgentObservation::getResult).map(CapabilityResult::getOutput)
+                    .filter(java.util.Objects::nonNull).toList()));
         }
     }
 
