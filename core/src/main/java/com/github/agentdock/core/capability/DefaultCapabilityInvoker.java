@@ -1,5 +1,6 @@
 package com.github.agentdock.core.capability;
 
+import com.github.agentdock.core.internal.ExecutorSupport;
 import com.github.agentdock.core.model.*;
 
 import java.time.Duration;
@@ -17,11 +18,8 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(
             CAPABILITY_PARALLELISM, CAPABILITY_PARALLELISM, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(Math.max(8, CAPABILITY_PARALLELISM * 4)),
-            runnable -> {
-        Thread thread = new Thread(runnable, "ai-capability-invoker");
-        thread.setDaemon(true);
-        return thread;
-    }, new ThreadPoolExecutor.AbortPolicy());
+            ExecutorSupport.daemonThreadFactory("ai-capability-invoker"),
+            new ThreadPoolExecutor.AbortPolicy());
 
     public void shutdown() {
         EXECUTOR.shutdownNow();
@@ -113,47 +111,24 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
     private CapabilityResult compensateOnce(AiCapability capability, IntentCandidate intent,
                                             AiExecutionContext context, CapabilityInvocation invocation,
                                             CapabilityResult failedResult, Duration timeout) {
-        Future<CapabilityResult> future = EXECUTOR.submit(
-                () -> capability.compensate(intent, context, invocation, failedResult));
-        try {
-            Duration effectiveTimeout = timeout == null || timeout.isNegative() || timeout.isZero()
-                    ? Duration.ofSeconds(30) : timeout;
-            CapabilityResult result = future.get(effectiveTimeout.toMillis(), TimeUnit.MILLISECONDS);
-            return result == null ? CapabilityResult.failure("EMPTY_COMPENSATION_RESULT", "补偿未返回结果", false) : result;
-        } catch (TimeoutException exception) {
-            future.cancel(true);
-            return CapabilityResult.failure("COMPENSATION_TIMEOUT", "能力补偿超时", false);
-        } catch (InterruptedException exception) {
-            future.cancel(true);
-            Thread.currentThread().interrupt();
-            return CapabilityResult.failure("COMPENSATION_INTERRUPTED", "能力补偿被中断", false);
-        } catch (ExecutionException exception) {
-            Throwable cause = exception.getCause();
-            return CapabilityResult.failure("COMPENSATION_EXCEPTION",
-                    cause == null ? exception.getMessage() : cause.getMessage(), false);
-        }
+        return CapabilityExecutionSupport.execute(EXECUTOR,
+                () -> capability.compensate(intent, context, invocation, failedResult), timeout,
+                new CapabilityExecutionSupport.FailureMessages(
+                        "EMPTY_COMPENSATION_RESULT", "补偿未返回结果",
+                        "COMPENSATION_TIMEOUT", "能力补偿超时", false,
+                        "COMPENSATION_INTERRUPTED", "能力补偿被中断",
+                        "COMPENSATION_EXCEPTION", false));
     }
 
     private CapabilityResult invokeOnce(AiCapability capability, IntentCandidate intent,
                                         AiExecutionContext context, Duration timeout) {
-        Future<CapabilityResult> future = EXECUTOR.submit(() -> capability.invoke(intent, context));
-        try {
-            Duration effectiveTimeout = timeout == null || timeout.isNegative() || timeout.isZero()
-                    ? Duration.ofSeconds(30) : timeout;
-            CapabilityResult result = future.get(effectiveTimeout.toMillis(), TimeUnit.MILLISECONDS);
-            return result == null ? CapabilityResult.failure("EMPTY_RESULT", "能力未返回结果", false) : result;
-        } catch (TimeoutException exception) {
-            future.cancel(true);
-            return CapabilityResult.failure("CAPABILITY_TIMEOUT", "能力调用超时", true);
-        } catch (InterruptedException exception) {
-            future.cancel(true);
-            Thread.currentThread().interrupt();
-            return CapabilityResult.failure("CAPABILITY_INTERRUPTED", "能力调用被中断", false);
-        } catch (ExecutionException exception) {
-            Throwable cause = exception.getCause();
-            return CapabilityResult.failure("CAPABILITY_EXCEPTION",
-                    cause == null ? exception.getMessage() : cause.getMessage(), true);
-        }
+        return CapabilityExecutionSupport.execute(EXECUTOR,
+                () -> capability.invoke(intent, context), timeout,
+                new CapabilityExecutionSupport.FailureMessages(
+                        "EMPTY_RESULT", "能力未返回结果",
+                        "CAPABILITY_TIMEOUT", "能力调用超时", true,
+                        "CAPABILITY_INTERRUPTED", "能力调用被中断",
+                        "CAPABILITY_EXCEPTION", true));
     }
 
     private CapabilityResult validateOutput(CapabilityDefinition definition, CapabilityResult result) {

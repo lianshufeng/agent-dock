@@ -10,6 +10,7 @@ import com.github.agentdock.core.type.AiEventType;
 import com.github.agentdock.core.type.IntentStatus;
 import com.github.agentdock.core.task.*;
 import com.github.agentdock.core.context.*;
+import com.github.agentdock.core.internal.ExecutorSupport;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -35,11 +36,8 @@ public final class IntentLoopExecutor {
     private static final ExecutorService PLANNER_EXECUTOR = new ThreadPoolExecutor(
             PLANNER_PARALLELISM, PLANNER_PARALLELISM, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(Math.max(8, PLANNER_PARALLELISM * 4)),
-            runnable -> {
-        Thread thread = new Thread(runnable, "ai-intent-planner");
-        thread.setDaemon(true);
-        return thread;
-    }, new ThreadPoolExecutor.AbortPolicy());
+            ExecutorSupport.daemonThreadFactory("ai-intent-planner"),
+            new ThreadPoolExecutor.AbortPolicy());
 
     public void shutdown() {
         PLANNER_EXECUTOR.shutdownNow();

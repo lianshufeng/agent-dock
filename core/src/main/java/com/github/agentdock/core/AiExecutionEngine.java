@@ -5,6 +5,7 @@ import com.github.agentdock.core.aggregation.ResultSummarizer;
 import com.github.agentdock.core.event.*;
 import com.github.agentdock.core.loop.IntentLoopExecutor;
 import com.github.agentdock.core.intent.IntentFactory;
+import com.github.agentdock.core.internal.ExecutorSupport;
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.store.ChatHistoryStore;
 import com.github.agentdock.core.type.*;
@@ -20,7 +21,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,11 +37,8 @@ public class AiExecutionEngine {
             DAG_PARALLELISM, DAG_PARALLELISM,
             0L, java.util.concurrent.TimeUnit.MILLISECONDS,
             new java.util.concurrent.ArrayBlockingQueue<>(Math.max(8, Runtime.getRuntime().availableProcessors() * 4)),
-            runnable -> {
-        Thread thread = new Thread(runnable, "ai-dag-worker");
-        thread.setDaemon(true);
-        return thread;
-            }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+            ExecutorSupport.daemonThreadFactory("ai-dag-worker"),
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(DAG_EXECUTOR::shutdownNow, "ai-dag-shutdown"));
     }
