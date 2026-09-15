@@ -6,6 +6,7 @@ import com.github.agentdock.core.loop.IntentLoopPlanner;
 import com.github.agentdock.core.loop.PlanningRuleContributor;
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.provider.IntentLoopContract;
+import com.github.agentdock.core.provider.CapabilityArgumentsContract;
 import com.github.agentdock.core.provider.LangChain4jChatRequestFactory;
 import com.github.agentdock.core.provider.ObservedModelCall;
 import dev.langchain4j.model.chat.ChatModel;
@@ -72,6 +73,7 @@ public final class LangChain4jIntentLoopPlanner implements IntentLoopPlanner {
                     request.getConversation(), request.getIntent() == null ? null : request.getIntent().getId(),
                     "intent-loop", request.getIteration() + 1).aiMessage().text();
             IntentLoopDecision decision = objectMapper.readValue(response, IntentLoopDecision.class);
+            repairInvalidArguments(request, decision, images);
             log.info("AI Loop 规划返回 executionId={}, intentId={}, status={}, toolCount={}",
                     request.getConversation() == null ? null : request.getConversation().getExecutionId(),
                     request.getIntent() == null ? null : request.getIntent().getId(), decision.getStatus(),
@@ -80,6 +82,46 @@ public final class LangChain4jIntentLoopPlanner implements IntentLoopPlanner {
         } catch (Exception exception) {
             throw new IllegalStateException("意图 Loop 模型调用或结果解析失败", exception);
         }
+    }
+
+    /** 自由 arguments 出现非法字段时，使用已选能力的精确输入 Schema 重建参数。 */
+    private void repairInvalidArguments(IntentLoopRequest request, IntentLoopDecision decision, List<String> images) {
+        if (decision == null || decision.getToolInvocations() == null) return;
+        for (CapabilityInvocation invocation : decision.getToolInvocations()) {
+            CapabilityDefinition definition = request.getCapabilities().stream()
+                    .filter(item -> item.getCode().equals(invocation.getCapabilityCode())).findFirst().orElse(null);
+            if (definition == null || validArguments(invocation, definition)) continue;
+            CapabilityArgumentsContract contract = new CapabilityArgumentsContract(definition);
+            String repairPrompt = """
+                    为已经选定的能力重新生成调用参数。
+                    当前意图：%s
+                    预期结果：%s
+                    所选能力：%s
+                    原始错误参数：%s
+                    %s
+                    """.formatted(json(request.getIntent()), text(request.getIntent().getExpectedResult()),
+                    json(definition), json(invocation.getArguments()), contract.promptDescription()).strip();
+            try {
+                String repaired = ObservedModelCall.chat(chatModel,
+                        LangChain4jChatRequestFactory.jsonUserRequest(repairPrompt, images, contract),
+                        request.getConversation(), request.getIntent().getId(),
+                        "intent-loop-arguments", request.getIteration() + 1).aiMessage().text();
+                @SuppressWarnings("unchecked")
+                java.util.Map<String, Object> arguments = objectMapper.readValue(repaired, java.util.LinkedHashMap.class);
+                invocation.setArguments(arguments);
+            } catch (Exception exception) {
+                throw new IllegalStateException("能力参数重建失败: " + definition.getCode(), exception);
+            }
+        }
+    }
+
+    private boolean validArguments(CapabilityInvocation invocation, CapabilityDefinition definition) {
+        java.util.Map<String, Object> arguments = invocation.getArguments() == null ? java.util.Map.of()
+                : invocation.getArguments();
+        java.util.Map<String, CapabilitySchemaField> fields = definition.effectiveInputContract();
+        if (arguments.keySet().stream().anyMatch(key -> !fields.containsKey(key))) return false;
+        return fields.entrySet().stream().noneMatch(entry -> entry.getValue().isRequired()
+                && (!arguments.containsKey(entry.getKey()) || arguments.get(entry.getKey()) == null));
     }
 
     private String contributedRules(IntentLoopRequest request) {
