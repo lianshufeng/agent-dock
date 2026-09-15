@@ -57,6 +57,12 @@ public class IntentFactory {
 
     /** 汇总全部通用意图，一次调用 LLM，再生成按依赖关系和优先级排序的串行计划。 */
     public IntentAnalysis analyze(ConversationContext context) {
+        return analyze(context, null, Map.of());
+    }
+
+    /** 在执行中重新识别意图时，额外向上下文工程提供当前计划和已完成结果。 */
+    public IntentAnalysis analyze(ConversationContext context, Object executionPlan,
+                                  Map<String, IntentResult> previousIntentResults) {
         String intentCatalog = buildIntentCatalog();
         IntentAdapterResult analysis;
         RuntimeException analysisFailure = null;
@@ -64,6 +70,8 @@ public class IntentFactory {
             ContextRequest contextRequest = new ContextRequest();
             contextRequest.setPhase(ContextPhase.INTENT_ANALYSIS);
             contextRequest.setConversation(context);
+            contextRequest.setExecutionPlan(executionPlan);
+            contextRequest.setPreviousIntentResults(previousIntentResults == null ? Map.of() : previousIntentResults);
             ContextSnapshot snapshot = contextAssembler.assemble(contextRequest);
             analysis = Optional.ofNullable(analyzer == null ? null : analyzer.analyze(context, intentCatalog, snapshot))
                     .orElse(IntentAdapterResult.empty());

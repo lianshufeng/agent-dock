@@ -31,6 +31,7 @@ import com.github.agentdock.core.task.TaskReplanner;
 import com.github.agentdock.core.task.NoopTaskReplanner;
 import com.github.agentdock.core.planning.PlanReplanner;
 import com.github.agentdock.core.planning.NoopPlanReplanner;
+import com.github.agentdock.core.steering.ExecutionSteering;
 
 /**
  * AI 内核的自管理入口。业务项目只需注册自己的适配器和能力，不需要依赖 Spring。
@@ -176,6 +177,11 @@ public final class AiKernel {
 
     /** 执行一次完整会话：意图识别、排序、路由、执行和结果聚合。 */
     public ConversationResult execute(ConversationContext context) {
+        return execute(context, ExecutionSteering.disabled());
+    }
+
+    /** 使用可选的执行中输入通道；旧宿主继续调用单参数入口即可。 */
+    public ConversationResult execute(ConversationContext context, ExecutionSteering steering) {
         java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);
         context.setModelUsageRecorder(modelUsageRecorder);
         CapabilityInvoker invoker = capabilityInvoker == null
@@ -185,7 +191,7 @@ public final class AiKernel {
                         capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
                         capabilityCandidateSelector, contextAssembler, taskVerifier, taskReplanner),
                 chatHistoryStore, executionMode, planReplanner, contextAssembler)
-                .execute(context);
+                .execute(context, steering == null ? ExecutionSteering.disabled() : steering);
     }
 
     public void shutdownExecutors() {

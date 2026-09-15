@@ -11,6 +11,7 @@ public final class ExecutionPlan {
     private String id;
     private int version = 1;
     private int replanCount;
+    private int steeringCount;
     private LinkedHashMap<String, PlanNode> nodes = new LinkedHashMap<>();
 
     public static ExecutionPlan from(String executionId, List<IntentCandidate> intents) {

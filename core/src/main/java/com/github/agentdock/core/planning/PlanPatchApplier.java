@@ -8,9 +8,18 @@ import java.util.*;
 public final class PlanPatchApplier {
     public Set<String> apply(ExecutionPlan plan, PlanPatch patch, Set<String> allowedIntentCodes,
                              int maxPlanVersions) {
+        return apply(plan, patch, allowedIntentCodes, maxPlanVersions, true);
+    }
+
+    /** 用户主动调整计划时不消耗系统自动重规划次数。 */
+    public Set<String> apply(ExecutionPlan plan, PlanPatch patch, Set<String> allowedIntentCodes,
+                             int maxPlanVersions, boolean automaticReplan) {
         if (plan == null || patch == null || patch.getOperations() == null || patch.getOperations().isEmpty())
             throw new IllegalArgumentException("计划补丁不能为空");
-        if (plan.getVersion() >= Math.max(maxPlanVersions, 1)) throw new IllegalArgumentException("已达到最大计划版本数");
+        // 旧实现以初始 version=1 计入上限，因此 maxPlanVersions=4 时最多允许 3 次自动重规划。
+        // 用户 steering 使用独立计数，但旧 apply(...) 的次数语义必须保持不变。
+        if (automaticReplan && plan.getReplanCount() >= Math.max(maxPlanVersions - 1, 0))
+            throw new IllegalArgumentException("已达到最大自动重规划次数");
         LinkedHashMap<String, PlanNode> copy = copy(plan.getNodes());
         Set<String> resetNodeIds = new LinkedHashSet<>();
         for (PlanPatchOperation operation : patch.getOperations()) {
@@ -25,7 +34,8 @@ public final class PlanPatchApplier {
         validateDependencies(copy);
         plan.setNodes(copy);
         plan.setVersion(plan.getVersion() + 1);
-        plan.setReplanCount(plan.getReplanCount() + 1);
+        if (automaticReplan) plan.setReplanCount(plan.getReplanCount() + 1);
+        else plan.setSteeringCount(plan.getSteeringCount() + 1);
         return resetNodeIds;
     }
 
