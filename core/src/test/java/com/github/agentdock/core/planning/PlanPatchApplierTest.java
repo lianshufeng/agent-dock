@@ -41,6 +41,23 @@ class PlanPatchApplierTest {
                 () -> applier.apply(plan, addPatch(intent("replanned-4", "chat")), Set.of("chat"), 4));
     }
 
+    @Test
+    void cancellingUpstreamWithoutItsPendingDependentIsRejectedAtomically() {
+        IntentCandidate upstream = intent("upstream", "chat");
+        IntentCandidate downstream = intent("downstream", "chat");
+        downstream.setDependsOn(List.of("upstream"));
+        ExecutionPlan plan = ExecutionPlan.from("execution", List.of(upstream, downstream));
+        PlanPatchOperation cancel = new PlanPatchOperation();
+        cancel.setType(PlanPatchType.CANCEL_NODE); cancel.setTargetNodeId("upstream");
+        PlanPatch patch = new PlanPatch(); patch.setOperations(List.of(cancel));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new PlanPatchApplier().apply(plan, patch, Set.of("chat"), 4, false));
+        assertEquals(1, plan.getVersion());
+        assertEquals(PlanNodeStatus.PENDING, plan.getNodes().get("upstream").getStatus());
+        assertEquals(PlanNodeStatus.PENDING, plan.getNodes().get("downstream").getStatus());
+    }
+
     private PlanPatch addPatch(IntentCandidate intent) {
         PlanPatchOperation operation = new PlanPatchOperation();
         operation.setType(PlanPatchType.ADD_NODE);

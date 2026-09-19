@@ -3,6 +3,7 @@ package com.github.agentdock.core.intent;
 import com.github.agentdock.core.context.ContextSnapshot;
 import com.github.agentdock.core.model.ConversationContext;
 import com.github.agentdock.core.model.IntentAdapterResult;
+import com.github.agentdock.core.steering.SteeringAdapterResult;
 
 /** LLM 供应商适配接口；AI 内核不绑定具体模型 SDK。 */
 public interface LlmIntentAnalyzer {
@@ -13,5 +14,17 @@ public interface LlmIntentAnalyzer {
     default IntentAdapterResult analyze(ConversationContext context, String intentCatalog,
                                         ContextSnapshot snapshot) {
         return analyze(context, intentCatalog);
+    }
+
+    /**
+     * 判断补充输入应如何影响当前计划。旧适配器无需修改，默认将新输入作为追加意图处理。
+     */
+    default SteeringAdapterResult analyzeSteering(ConversationContext context, String intentCatalog,
+                                                   ContextSnapshot snapshot) {
+        IntentAdapterResult analysis = analyze(context, intentCatalog, snapshot);
+        SteeringAdapterResult result = new SteeringAdapterResult();
+        result.setCandidates(analysis == null ? java.util.List.of() : analysis.getCandidates());
+        result.setClarificationQuestion(analysis == null ? null : analysis.getClarificationQuestion());
+        return result;
     }
 }

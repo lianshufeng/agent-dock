@@ -7,7 +7,9 @@ import com.github.agentdock.core.context.ContextSnapshot;
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.provider.LangChain4jChatRequestFactory;
 import com.github.agentdock.core.provider.IntentAnalysisContract;
+import com.github.agentdock.core.provider.SteeringAnalysisContract;
 import com.github.agentdock.core.provider.ObservedModelCall;
+import com.github.agentdock.core.steering.SteeringAdapterResult;
 import dev.langchain4j.model.chat.ChatModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +45,7 @@ public class LangChain4jIntentAnalyzer implements LlmIntentAnalyzer {
                 %s
                 priority 数值越大越优先；存在先后依赖时，在 dependsOn 中填写前置意图的 id。
                 连续任务按目标拆分；后续目标需要前一步的数据时必须声明 dependsOn，不生成参数或结果字段路径。
+                description 和 expectedResult 必须保留用户指定的关键实体、地点和数值，以便后续单意图执行准确区分不同目标。
                 每个意图必须返回 progressText：面向用户的无主语、拟人化、简短进度文案，例如“开始查找相关信息”；不要写意图类型、编码、工具名或 JSON。
                 只按用户希望达成的目标识别意图，不推断系统具有哪些能力，不选择工具，也不把实现目标所需的内部步骤识别成额外意图。
                 宿主补充规则：
@@ -71,6 +74,36 @@ public class LangChain4jIntentAnalyzer implements LlmIntentAnalyzer {
             return result;
         } catch (Exception exception) {
             throw new IllegalStateException("意图分析模型调用或结果解析失败", exception);
+        }
+    }
+
+    @Override
+    public SteeringAdapterResult analyzeSteering(ConversationContext context, String intentCatalog,
+                                                  ContextSnapshot snapshot) {
+        String prompt = """
+                你是执行中输入的计划变更判断器。只从给定意图目录生成本次新增或替换所需的意图。
+                %s
+                当前计划及已完成结果在受控上下文中。不要重新生成所有原意图。
+                ADD：普通补充，原未执行节点全部保留；UPDATE：调整既有目标的条件；REPLACE：将既有目标改成另一个目标；CANCEL：明确取消既有目标；NOOP：重复输入。
+                ADD 默认留空 targetNodeIds，独立补充任务不得指定原节点为下游。仅当新任务与原待执行节点共享同一前置数据、且原节点确实需要新结果时，才填写应等待新增任务的原节点。UPDATE/REPLACE/CANCEL 时 targetNodeIds 为直接受影响的原未执行节点。运行中及已完成节点不可修改。UPDATE/REPLACE 时 candidates 与 targetNodeIds 一一对应，顺序相同。
+                对于 CANCEL/REPLACE，目标节点的待执行下游会由核心库确定性处理。
+                新意图的 dependsOn 可以引用本次 candidates 的意图 ID，或当前计划中状态为 SUCCESS/PENDING 的节点 ID；不能依赖已取消或失败的节点。
+                可用意图：
+                %s
+                受控上下文快照：
+                %s
+                本次补充输入：
+                %s
+                """.formatted(SteeringAnalysisContract.INSTANCE.promptDescription(), intentCatalog,
+                snapshotText(snapshot), context.getUserInput()).strip();
+        try {
+            String text = ObservedModelCall.chat(chatModel,
+                    LangChain4jChatRequestFactory.jsonUserRequest(prompt, context.getImageUrls(),
+                            SteeringAnalysisContract.INSTANCE), context, null,
+                    "steering-analysis", 0).aiMessage().text();
+            return objectMapper.readValue(text, SteeringAdapterResult.class);
+        } catch (Exception exception) {
+            throw new IllegalStateException("补充输入计划分析失败", exception);
         }
     }
 

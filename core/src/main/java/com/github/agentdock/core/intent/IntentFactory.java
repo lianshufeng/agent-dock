@@ -3,6 +3,7 @@ package com.github.agentdock.core.intent;
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.type.IntentComplexity;
 import com.github.agentdock.core.context.*;
+import com.github.agentdock.core.steering.*;
 import java.util.*;
 
 /** 多意图工厂：收集适配器结果，合并上下文要求并生成串行队列顺序。 */
@@ -81,6 +82,34 @@ public class IntentFactory {
         }
         if (isEmpty(analysis)) analysis = applyFallbacks(context, intentCatalog);
         if (isEmpty(analysis) && analysisFailure != null) throw analysisFailure;
+        return normalize(context, analysis, Set.of());
+    }
+
+    /** 补充输入仅识别新增意图，并由模型显式声明对旧计划的影响范围。 */
+    public SteeringPlanDecision analyzeSteering(ConversationContext context, Object executionPlan,
+                                                Map<String, IntentResult> previousIntentResults) {
+        String intentCatalog = buildIntentCatalog();
+        ContextRequest request = new ContextRequest();
+        request.setPhase(ContextPhase.INTENT_ANALYSIS);
+        request.setConversation(context);
+        request.setExecutionPlan(executionPlan);
+        request.setPreviousIntentResults(previousIntentResults == null ? Map.of() : previousIntentResults);
+        ContextSnapshot snapshot = contextAssembler.assemble(request);
+        SteeringAdapterResult proposed = analyzer == null ? null
+                : analyzer.analyzeSteering(context, intentCatalog, snapshot);
+        if (proposed == null) proposed = new SteeringAdapterResult();
+        IntentAdapterResult candidates = new IntentAdapterResult();
+        candidates.setCandidates(proposed.getCandidates());
+        candidates.setClarificationQuestion(proposed.getClarificationQuestion());
+        Set<String> existingIds = executionPlan instanceof com.github.agentdock.core.planning.ExecutionPlan plan
+                ? Set.copyOf(plan.getNodes().keySet()) : Set.of();
+        IntentAnalysis normalized = normalize(context, candidates, existingIds);
+        return new SteeringPlanDecision(proposed.getAction(), proposed.getTargetNodeIds(),
+                normalized.getOrderedIntents(), proposed.getReason(), normalized.getClarificationQuestion());
+    }
+
+    private IntentAnalysis normalize(ConversationContext context, IntentAdapterResult analysis,
+                                     Set<String> externalDependencyIds) {
         for (IntentAnalysisPostProcessor postProcessor : postProcessors) {
             analysis = Optional.ofNullable(postProcessor.process(context, analysis))
                     .orElseThrow(() -> new IllegalStateException("意图分析后处理器未返回结果"));
@@ -125,7 +154,7 @@ public class IntentFactory {
             candidate.setContextRequirement(normalizeContextRequirement(candidate.getContextRequirement()));
             requirement = requirement.merge(candidate.getContextRequirement());
         }
-        validateDependencies(candidates);
+        validateDependencies(candidates, externalDependencyIds);
         List<IntentCandidate> ordered = topologicalSort(candidates);
         return new IntentAnalysis(ordered, requirement, analysis.getClarificationQuestion());
     }
@@ -150,14 +179,14 @@ public class IntentFactory {
                 requirement.getScopes() == null ? Set.of() : requirement.getScopes());
     }
 
-    private void validateDependencies(List<IntentCandidate> candidates) {
+    private void validateDependencies(List<IntentCandidate> candidates, Set<String> externalDependencyIds) {
         Set<String> ids = new HashSet<>();
         for (IntentCandidate candidate : candidates) {
             if (!ids.add(candidate.getId())) throw new IllegalArgumentException("意图实例 ID 重复: " + candidate.getId());
         }
         for (IntentCandidate candidate : candidates) {
             for (String dependency : candidate.getDependsOn()) {
-                if (!ids.contains(dependency)) {
+                if (!ids.contains(dependency) && !externalDependencyIds.contains(dependency)) {
                     throw new IllegalArgumentException("意图依赖不存在: " + dependency);
                 }
                 if (candidate.getId().equals(dependency)) {

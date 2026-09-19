@@ -92,6 +92,9 @@ public final class PlanPatchApplier {
         for (PlanNode node : nodes.values()) for (String dependency : safe(node.getIntent().getDependsOn())) {
             if (!nodes.containsKey(dependency)) throw new IllegalArgumentException("计划依赖不存在: " + dependency);
             if (node.getId().equals(dependency)) throw new IllegalArgumentException("计划节点不能依赖自身: " + node.getId());
+            if (node.getStatus() != PlanNodeStatus.CANCELLED
+                    && nodes.get(dependency).getStatus() == PlanNodeStatus.CANCELLED)
+                throw new IllegalArgumentException("有效计划节点不能依赖已取消节点: " + node.getId());
         }
         Set<String> visiting = new HashSet<>();
         Set<String> visited = new HashSet<>();

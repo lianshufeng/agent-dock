@@ -54,6 +54,7 @@ public class AiExecutionEngine {
     private final AiExecutionMode executionMode;
     private final PlanReplanner planReplanner;
     private final ContextAssembler contextAssembler;
+    private final SteeringPlanMode steeringPlanMode;
     private final PlanPatchApplier planPatchApplier = new PlanPatchApplier();
     private static final int MAX_PLAN_VERSIONS = 4;
 
@@ -74,6 +75,15 @@ public class AiExecutionEngine {
                              AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
                              ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode,
                              PlanReplanner planReplanner, ContextAssembler contextAssembler) {
+        this(intentFactory, aggregator, summarizer, events, intentLoopExecutor, chatHistoryStore,
+                executionMode, planReplanner, contextAssembler, SteeringPlanMode.CONSERVATIVE);
+    }
+
+    public AiExecutionEngine(IntentFactory intentFactory, ResultAggregator aggregator, ResultSummarizer summarizer,
+                             AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
+                             ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode,
+                             PlanReplanner planReplanner, ContextAssembler contextAssembler,
+                             SteeringPlanMode steeringPlanMode) {
         this.intentFactory = intentFactory;
         this.aggregator = aggregator;
         this.summarizer = summarizer;
@@ -83,6 +93,7 @@ public class AiExecutionEngine {
         this.executionMode = executionMode == null ? AiExecutionMode.SERIAL : executionMode;
         this.planReplanner = planReplanner == null ? new NoopPlanReplanner() : planReplanner;
         this.contextAssembler = contextAssembler == null ? new DefaultContextAssembler() : contextAssembler;
+        this.steeringPlanMode = steeringPlanMode == null ? SteeringPlanMode.CONSERVATIVE : steeringPlanMode;
     }
 
     /** 按已经排序的意图队列串行执行，并持续发布可供 SSE 转发的状态事件。 */
@@ -102,15 +113,6 @@ public class AiExecutionEngine {
         preloadAnalysisHistory(conversation);
         appendUser(conversation);
         publish(conversation, null, AiEventType.CONVERSATION_STARTED, "开始处理", 0);
-        SteeringBatch earlySteering = steering.drain();
-        if (!earlySteering.isEmpty()) {
-            appendSteering(conversation, earlySteering);
-            // 还没有任务开始时，补充输入就是当前最新意图；原始输入只保留在会话历史中。
-            conversation.setUserInput(joinInputs(null, earlySteering));
-            publish(conversation, null, AiEventType.STEERING_RECEIVED,
-                    "已接收 " + earlySteering.inputs().size() + " 条补充要求", 5,
-                    Map.of("inputIds", inputIds(earlySteering)));
-        }
         IntentAnalysis analysis;
         try {
             analysis = intentFactory.analyze(conversation);
@@ -146,14 +148,10 @@ public class AiExecutionEngine {
         AiExecutionContext context = new AiExecutionContext(conversation);
         List<IntentResult> results = new ArrayList<>();
         ExecutionPlan plan = ExecutionPlan.from(conversation.getExecutionId(), analysis.getOrderedIntents());
-        if (!earlySteering.isEmpty()) publish(conversation, null, AiEventType.STEERING_APPLIED,
-                "补充要求已替换尚未执行的初始计划", 15,
-                Map.of("inputIds", inputIds(earlySteering), "planVersion", plan.getVersion()));
         while (true) {
             SteeringBatch steeringBatch = steering.drain();
             if (!steeringBatch.isEmpty()) {
-                ConversationResult stopped = applySteering(steeringBatch, plan, context, results, conversation);
-                if (stopped != null) return completeEarly(conversation, stopped);
+                applySteering(steeringBatch, plan, context, results, conversation);
             }
             if (plan.pendingNodes().isEmpty()) {
                 if (steering.sealIfEmpty()) break;
@@ -212,9 +210,10 @@ public class AiExecutionEngine {
         return finalResult;
     }
 
-    private ConversationResult applySteering(SteeringBatch batch, ExecutionPlan plan, AiExecutionContext context,
-                                             List<IntentResult> results, ConversationContext conversation) {
+    private void applySteering(SteeringBatch batch, ExecutionPlan plan, AiExecutionContext context,
+                               List<IntentResult> results, ConversationContext conversation) {
         appendSteering(conversation, batch);
+        String previousInput = conversation.getUserInput();
         conversation.setUserInput(joinInputs(null, batch));
         if (chatHistoryStore != null && conversation.getConversationId() != null) {
             conversation.setHistory(chatHistoryStore.load(conversation.getConversationId(), 50));
@@ -224,63 +223,204 @@ public class AiExecutionEngine {
                 Map.of("inputIds", inputIds(batch), "planVersion", plan.getVersion()));
         publish(conversation, null, AiEventType.STEERING_ANALYZING, "正在根据补充要求调整执行计划", 16,
                 Map.of("inputIds", inputIds(batch), "planVersion", plan.getVersion()));
-        IntentAnalysis analysis;
+        SteeringPlanDecision decision;
         try {
-            analysis = intentFactory.analyze(conversation, plan, context.getResults());
+            if (steeringPlanMode == SteeringPlanMode.LEGACY_REPLACE_PENDING) {
+                IntentAnalysis analysis = intentFactory.analyze(conversation, plan, context.getResults());
+                decision = new SteeringPlanDecision(SteeringAction.ADD, List.of(),
+                        analysis.getOrderedIntents(), "旧覆盖策略", analysis.getClarificationQuestion());
+            } else {
+                decision = intentFactory.analyzeSteering(conversation, plan, context.getResults());
+            }
         } catch (RuntimeException exception) {
-            publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求分析失败", 100,
-                    Map.of("inputIds", inputIds(batch), "reason", displayText(exception.getMessage(), "意图分析失败")));
-            return new ConversationResult(IntentStatus.FAILED, List.copyOf(results), "补充要求分析失败，请重新描述后再试");
+            try {
+                IntentAnalysis fallback = intentFactory.analyze(conversation, plan, context.getResults());
+                List<IntentCandidate> fresh = fallback.getOrderedIntents().stream().filter(candidate ->
+                        plan.getNodes().values().stream().noneMatch(existing ->
+                                existing.getIntent().getCode().equals(candidate.getCode())
+                                        && java.util.Objects.equals(existing.getIntent().getDescription(),
+                                        candidate.getDescription()))).toList();
+                if (fresh.isEmpty() && !fallback.requiresClarification())
+                    throw new IllegalArgumentException("降级分析未识别出不同于原计划的新意图");
+                decision = new SteeringPlanDecision(SteeringAction.ADD, List.of(),
+                        fresh, "计划变更判断失败，安全降级为追加", fallback.getClarificationQuestion());
+            } catch (RuntimeException fallbackFailure) {
+                conversation.setUserInput(joinInputs(previousInput, batch));
+                publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求分析失败，原计划继续执行", 16,
+                        Map.of("inputIds", inputIds(batch),
+                                "reason", displayText(fallbackFailure.getMessage(), "意图分析失败")));
+                return;
+            }
         }
-        if (analysis.requiresClarification()) {
-            publish(conversation, null, AiEventType.STEERING_REJECTED, analysis.getClarificationQuestion(), 100,
+        // 分类只看本次补充；执行阶段需同时保留原任务与新增约束，避免原意图失去原始输入。
+        conversation.setUserInput(joinInputs(previousInput, batch));
+        if (decision.requiresClarification()) {
+            publish(conversation, null, AiEventType.STEERING_REJECTED, decision.clarificationQuestion(), 16,
                     Map.of("inputIds", inputIds(batch), "reason", "WAITING_USER"));
-            return new ConversationResult(IntentStatus.WAITING_USER, List.copyOf(results), analysis.getClarificationQuestion());
+            publish(conversation, null, AiEventType.WAITING_USER,
+                    "补充要求需澄清：" + decision.clarificationQuestion(), 16);
+            return;
         }
-        if (analysis.getOrderedIntents().isEmpty()) {
-            publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求未识别出可执行意图", 100,
+        if (decision.action() == SteeringAction.NOOP) {
+            publish(conversation, null, AiEventType.STEERING_APPLIED, "补充要求与已接收内容重复，继续原计划", 19,
+                    Map.of("inputIds", inputIds(batch), "planVersion", plan.getVersion(), "operation", "NOOP"));
+            return;
+        }
+        if (decision.action() != SteeringAction.CANCEL && decision.intents().isEmpty()) {
+            publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求未识别出可执行意图", 16,
                     Map.of("inputIds", inputIds(batch), "reason", "NO_INTENT"));
-            return new ConversationResult(IntentStatus.FAILED, List.copyOf(results), "补充要求未识别出可执行意图");
+            return;
         }
 
         int previousVersion = plan.getVersion();
-        List<String> cancelledIds = plan.pendingNodes().stream().map(PlanNode::getId).toList();
-        List<IntentCandidate> added = rebaseIntents(analysis.getOrderedIntents(), previousVersion + 1);
-        List<PlanPatchOperation> operations = new ArrayList<>();
-        for (String id : cancelledIds) {
-            PlanPatchOperation operation = new PlanPatchOperation();
-            operation.setType(PlanPatchType.CANCEL_NODE); operation.setTargetNodeId(id); operations.add(operation);
+        PlanPatch patch;
+        try {
+            if (steeringPlanMode == SteeringPlanMode.LEGACY_REPLACE_PENDING) {
+                patch = legacySteeringPatch(decision, plan, previousVersion + 1);
+            } else {
+                try {
+                    patch = steeringPatch(decision, plan, previousVersion + 1);
+                } catch (IllegalArgumentException invalidDecision) {
+                    if (decision.action() == SteeringAction.ADD || decision.intents().isEmpty()) throw invalidDecision;
+                    decision = new SteeringPlanDecision(SteeringAction.ADD, List.of(), decision.intents(),
+                            "目标节点无效，安全降级为追加", null);
+                    patch = steeringPatch(decision, plan, previousVersion + 1);
+                }
+            }
+            planPatchApplier.apply(plan, patch,
+                    intentFactory.intentDefinitions().stream().map(IntentDefinition::getCode)
+                            .collect(java.util.stream.Collectors.toSet()), Integer.MAX_VALUE, false);
+        } catch (IllegalArgumentException exception) {
+            publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求无法应用到当前计划", 16,
+                    Map.of("inputIds", inputIds(batch), "reason", exception.getMessage()));
+            return;
         }
-        for (IntentCandidate intent : added) {
+        List<String> cancelledIds = patch.getOperations().stream()
+                .filter(operation -> operation.getType() == PlanPatchType.CANCEL_NODE)
+                .map(PlanPatchOperation::getTargetNodeId).toList();
+        List<String> replacedIds = patch.getOperations().stream()
+                .filter(operation -> operation.getType() == PlanPatchType.REPLACE_NODE)
+                .map(PlanPatchOperation::getTargetNodeId).toList();
+        List<String> addedIds = patch.getOperations().stream()
+                .filter(operation -> operation.getType() == PlanPatchType.ADD_NODE)
+                .map(operation -> operation.getNode().getId()).toList();
+        List<String> supersededResultIds = steeringPlanMode == SteeringPlanMode.LEGACY_REPLACE_PENDING
+                ? results.stream().map(IntentResult::getIntentId).toList() : List.of();
+        if (steeringPlanMode == SteeringPlanMode.LEGACY_REPLACE_PENDING) results.clear();
+        String operationName = steeringPlanMode == SteeringPlanMode.LEGACY_REPLACE_PENDING
+                ? "LEGACY_REPLACE_PENDING" : decision.action().name();
+        cancelledIds.forEach(id -> publish(conversation, id, AiEventType.NODE_CANCELLED,
+                "已按补充要求取消尚未执行的任务", 17));
+        replacedIds.forEach(id -> publish(conversation, id, AiEventType.NODE_REPLACED,
+                "已按补充要求替换尚未执行的任务", 17));
+        publish(conversation, null, AiEventType.PLAN_VERSION_CREATED,
+                "执行计划已更新为版本 " + plan.getVersion(), 18,
+                Map.of("previousPlanVersion", previousVersion, "planVersion", plan.getVersion(),
+                        "operation", operationName, "cancelledNodeIds", cancelledIds,
+                        "replacedNodeIds", replacedIds, "addedNodeIds", addedIds,
+                        "supersededResultIds", supersededResultIds));
+        publish(conversation, null, AiEventType.STEERING_APPLIED, "已按补充要求更新后续任务", 19,
+                Map.of("inputIds", inputIds(batch), "planVersion", plan.getVersion(),
+                        "operation", operationName));
+    }
+
+    PlanPatch steeringPatch(SteeringPlanDecision decision, ExecutionPlan plan, int version) {
+        if (decision.intents().size() > 10 || decision.targetNodeIds().size() > 20)
+            throw new IllegalArgumentException("单次计划变更规模超过安全限制");
+        Set<String> pendingIds = plan.pendingNodes().stream().map(PlanNode::getId)
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        List<String> targets = decision.targetNodeIds().stream().distinct().toList();
+        if ((decision.action() == SteeringAction.REPLACE || decision.action() == SteeringAction.UPDATE
+                || decision.action() == SteeringAction.CANCEL)
+                && (targets.isEmpty() || !pendingIds.containsAll(targets))) {
+            throw new IllegalArgumentException("替换或取消只能指向尚未执行的计划节点");
+        }
+        List<PlanPatchOperation> operations = new ArrayList<>();
+        if (decision.action() == SteeringAction.ADD) {
+            if (!pendingIds.containsAll(targets))
+                throw new IllegalArgumentException("插入位置只能指向尚未执行的计划节点");
+            List<IntentCandidate> added = rebaseIntents(decision.intents(), version);
+            for (IntentCandidate intent : added) {
+                PlanPatchOperation operation = new PlanPatchOperation();
+                operation.setType(PlanPatchType.ADD_NODE); operation.setNode(intent);
+                operation.setDependsOn(intent.getDependsOn()); operations.add(operation);
+            }
+            Set<String> internalDependencies = added.stream().flatMap(intent -> intent.getDependsOn().stream())
+                    .collect(java.util.stream.Collectors.toSet());
+            List<String> terminalIds = added.stream()
+                    .filter(intent -> !internalDependencies.contains(intent.getId()))
+                    .map(IntentCandidate::getId).toList();
+            for (String target : targets) {
+                // 独立任务不能仅凭模型建议建立前置结果绑定，否则会把新任务结果误用为旧任务答案。
+                List<String> originalDependencies = plan.getNodes().get(target).getIntent().getDependsOn();
+                boolean sharesInput = !originalDependencies.isEmpty() && added.stream().anyMatch(intent ->
+                        intent.getDependsOn().stream().anyMatch(originalDependencies::contains));
+                if (!sharesInput) continue;
+                PlanPatchOperation operation = new PlanPatchOperation();
+                operation.setType(PlanPatchType.UPDATE_DEPENDENCY); operation.setTargetNodeId(target);
+                List<String> dependencies = new ArrayList<>(originalDependencies);
+                terminalIds.stream().filter(id -> !dependencies.contains(id)).forEach(dependencies::add);
+                operation.setDependsOn(dependencies); operations.add(operation);
+            }
+        } else if (decision.action() == SteeringAction.REPLACE || decision.action() == SteeringAction.UPDATE) {
+            if (targets.size() != decision.intents().size())
+                throw new IllegalArgumentException("替换节点与新意图数量必须一致");
+            Map<String, String> replacementIds = new LinkedHashMap<>();
+            for (int index = 0; index < targets.size(); index++)
+                replacementIds.put(decision.intents().get(index).getId(), targets.get(index));
+            for (int index = 0; index < targets.size(); index++) {
+                IntentCandidate intent = decision.intents().get(index);
+                List<String> dependencies = intent.getDependsOn().isEmpty()
+                        ? plan.getNodes().get(targets.get(index)).getIntent().getDependsOn()
+                        : intent.getDependsOn();
+                intent.setDependsOn(dependencies.stream()
+                        .map(id -> replacementIds.getOrDefault(id, id)).toList());
+                PlanPatchOperation operation = new PlanPatchOperation();
+                operation.setType(PlanPatchType.REPLACE_NODE); operation.setTargetNodeId(targets.get(index));
+                operation.setNode(intent); operation.setDependsOn(intent.getDependsOn()); operations.add(operation);
+            }
+        } else if (decision.action() == SteeringAction.CANCEL) {
+            Set<String> cancelled = pendingDescendants(plan, targets);
+            for (String id : cancelled) {
+                PlanPatchOperation operation = new PlanPatchOperation();
+                operation.setType(PlanPatchType.CANCEL_NODE); operation.setTargetNodeId(id); operations.add(operation);
+            }
+        }
+        if (operations.isEmpty()) throw new IllegalArgumentException("计划变更不能为空");
+        PlanPatch patch = new PlanPatch();
+        patch.setReason(displayText(decision.reason(), "用户在执行中补充了新的要求"));
+        patch.setOperations(operations);
+        return patch;
+    }
+
+    PlanPatch legacySteeringPatch(SteeringPlanDecision decision, ExecutionPlan plan, int version) {
+        List<PlanPatchOperation> operations = new ArrayList<>();
+        for (PlanNode node : plan.pendingNodes()) {
+            PlanPatchOperation operation = new PlanPatchOperation();
+            operation.setType(PlanPatchType.CANCEL_NODE); operation.setTargetNodeId(node.getId());
+            operations.add(operation);
+        }
+        for (IntentCandidate intent : rebaseIntents(decision.intents(), version)) {
             PlanPatchOperation operation = new PlanPatchOperation();
             operation.setType(PlanPatchType.ADD_NODE); operation.setNode(intent);
             operation.setDependsOn(intent.getDependsOn()); operations.add(operation);
         }
         PlanPatch patch = new PlanPatch();
-        patch.setReason("用户在执行中补充了新的要求"); patch.setOperations(operations);
-        try {
-            planPatchApplier.apply(plan, patch,
-                    intentFactory.intentDefinitions().stream().map(IntentDefinition::getCode)
-                            .collect(java.util.stream.Collectors.toSet()), Integer.MAX_VALUE, false);
-        } catch (IllegalArgumentException exception) {
-            publish(conversation, null, AiEventType.STEERING_REJECTED, "补充要求无法应用到当前计划", 100,
-                    Map.of("inputIds", inputIds(batch), "reason", exception.getMessage()));
-            return new ConversationResult(IntentStatus.FAILED, List.copyOf(results), "补充要求无法应用到当前计划：" + exception.getMessage());
-        }
-        // 旧结果仍保留在共享上下文中供新计划参考，但不再参与本轮最终聚合。
-        // 否则旧计划的失败或回答会污染新意图的最终输出。
-        List<String> supersededResultIds = results.stream().map(IntentResult::getIntentId).toList();
-        results.clear();
-        cancelledIds.forEach(id -> publish(conversation, id, AiEventType.NODE_CANCELLED,
-                "已取消原计划中尚未执行的任务", 17));
-        publish(conversation, null, AiEventType.PLAN_VERSION_CREATED,
-                "执行计划已更新为版本 " + plan.getVersion(), 18,
-                Map.of("previousPlanVersion", previousVersion, "planVersion", plan.getVersion(),
-                        "cancelledNodeIds", cancelledIds, "supersededResultIds", supersededResultIds,
-                        "addedNodeIds", added.stream().map(IntentCandidate::getId).toList()));
-        publish(conversation, null, AiEventType.STEERING_APPLIED, "已按补充要求更新后续任务", 19,
-                Map.of("inputIds", inputIds(batch), "planVersion", plan.getVersion()));
-        return null;
+        patch.setReason("旧覆盖策略：取消尚未执行的意图"); patch.setOperations(operations);
+        return patch;
+    }
+
+    private Set<String> pendingDescendants(ExecutionPlan plan, List<String> targets) {
+        Set<String> affected = new java.util.LinkedHashSet<>(targets);
+        boolean changed;
+        do {
+            changed = false;
+            for (PlanNode node : plan.pendingNodes()) {
+                if (!affected.contains(node.getId()) && node.getIntent().getDependsOn().stream().anyMatch(affected::contains))
+                    changed |= affected.add(node.getId());
+            }
+        } while (changed);
+        return affected;
     }
 
     private List<IntentCandidate> rebaseIntents(List<IntentCandidate> intents, int version) {
@@ -290,8 +430,8 @@ public class AiExecutionEngine {
         }
         for (IntentCandidate intent : intents) {
             intent.setId(ids.get(intent.getId()));
-            intent.setDependsOn(intent.getDependsOn().stream().map(ids::get)
-                    .filter(java.util.Objects::nonNull).toList());
+            intent.setDependsOn(intent.getDependsOn().stream()
+                    .map(id -> ids.getOrDefault(id, id)).toList());
         }
         return intents;
     }
@@ -315,12 +455,6 @@ public class AiExecutionEngine {
 
     private List<String> inputIds(SteeringBatch batch) {
         return batch.inputs().stream().map(SteeringInput::inputId).toList();
-    }
-
-    private ConversationResult completeEarly(ConversationContext conversation, ConversationResult result) {
-        appendAssistant(conversation, result.getMessage());
-        publish(conversation, null, AiEventType.FINAL_RESULT, result.getMessage(), 100);
-        return result;
     }
 
     private IntentResult executeIntent(IntentCandidate intent, int intentTotal,

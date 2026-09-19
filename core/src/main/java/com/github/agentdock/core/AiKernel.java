@@ -32,6 +32,7 @@ import com.github.agentdock.core.task.NoopTaskReplanner;
 import com.github.agentdock.core.planning.PlanReplanner;
 import com.github.agentdock.core.planning.NoopPlanReplanner;
 import com.github.agentdock.core.steering.ExecutionSteering;
+import com.github.agentdock.core.steering.SteeringPlanMode;
 
 /**
  * AI 内核的自管理入口。业务项目只需注册自己的适配器和能力，不需要依赖 Spring。
@@ -57,6 +58,14 @@ public final class AiKernel {
     private TaskReplanner taskReplanner = new NoopTaskReplanner();
     private PlanReplanner planReplanner = new NoopPlanReplanner();
     private AiExecutionMode executionMode = AiExecutionMode.SERIAL;
+    private SteeringPlanMode steeringPlanMode = "LEGACY_REPLACE_PENDING".equalsIgnoreCase(
+            System.getProperty("agentdock.steering.plan-mode"))
+            ? SteeringPlanMode.LEGACY_REPLACE_PENDING : SteeringPlanMode.CONSERVATIVE;
+
+    public AiKernel registerSteeringPlanMode(SteeringPlanMode mode) {
+        this.steeringPlanMode = java.util.Objects.requireNonNull(mode, "补充输入计划策略不能为空");
+        return this;
+    }
 
     public AiKernel registerExecutionMode(AiExecutionMode mode) {
         this.executionMode = mode == null ? AiExecutionMode.SERIAL : mode;
@@ -190,7 +199,7 @@ public final class AiKernel {
                 new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
                         capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
                         capabilityCandidateSelector, contextAssembler, taskVerifier, taskReplanner),
-                chatHistoryStore, executionMode, planReplanner, contextAssembler)
+                chatHistoryStore, executionMode, planReplanner, contextAssembler, steeringPlanMode)
                 .execute(context, steering == null ? ExecutionSteering.disabled() : steering);
     }
 
