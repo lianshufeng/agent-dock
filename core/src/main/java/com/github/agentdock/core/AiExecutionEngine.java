@@ -8,6 +8,8 @@ import com.github.agentdock.core.intent.IntentFactory;
 import com.github.agentdock.core.internal.ExecutorSupport;
 import com.github.agentdock.core.model.*;
 import com.github.agentdock.core.store.ChatHistoryStore;
+import com.github.agentdock.core.store.ExecutionCheckpointStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.agentdock.core.type.*;
 import com.github.agentdock.core.routing.ExecutionRouter;
 import com.github.agentdock.core.routing.impl.DefaultExecutionRouter;
@@ -47,6 +49,8 @@ public class AiExecutionEngine {
     private final IntentFactory intentFactory;
     private final IntentLoopExecutor intentLoopExecutor;
     private final ChatHistoryStore chatHistoryStore;
+    private final ExecutionCheckpointStore executionCheckpointStore;
+    private final ObjectMapper checkpointMapper = new ObjectMapper().findAndRegisterModules();
     private final ResultAggregator aggregator;
     private final ResultSummarizer summarizer;
     private final AiEventPublisher events;
@@ -84,12 +88,22 @@ public class AiExecutionEngine {
                              ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode,
                              PlanReplanner planReplanner, ContextAssembler contextAssembler,
                              SteeringPlanMode steeringPlanMode) {
+        this(intentFactory, aggregator, summarizer, events, intentLoopExecutor, chatHistoryStore,
+                executionMode, planReplanner, contextAssembler, steeringPlanMode, null);
+    }
+
+    public AiExecutionEngine(IntentFactory intentFactory, ResultAggregator aggregator, ResultSummarizer summarizer,
+                             AiEventPublisher events, IntentLoopExecutor intentLoopExecutor,
+                             ChatHistoryStore chatHistoryStore, AiExecutionMode executionMode,
+                             PlanReplanner planReplanner, ContextAssembler contextAssembler,
+                             SteeringPlanMode steeringPlanMode, ExecutionCheckpointStore executionCheckpointStore) {
         this.intentFactory = intentFactory;
         this.aggregator = aggregator;
         this.summarizer = summarizer;
         this.events = events;
         this.intentLoopExecutor = intentLoopExecutor;
         this.chatHistoryStore = chatHistoryStore;
+        this.executionCheckpointStore = executionCheckpointStore;
         this.executionMode = executionMode == null ? AiExecutionMode.SERIAL : executionMode;
         this.planReplanner = planReplanner == null ? new NoopPlanReplanner() : planReplanner;
         this.contextAssembler = contextAssembler == null ? new DefaultContextAssembler() : contextAssembler;
@@ -110,48 +124,69 @@ public class AiExecutionEngine {
         }
         log.info("AI 执行开始 executionId={}, conversationId={}, inputLength={}", conversation.getExecutionId(),
                 conversation.getConversationId(), conversation.getUserInput() == null ? 0 : conversation.getUserInput().length());
-        preloadAnalysisHistory(conversation);
-        appendUser(conversation);
-        publish(conversation, null, AiEventType.CONVERSATION_STARTED, "开始处理", 0);
-        IntentAnalysis analysis;
-        try {
-            analysis = intentFactory.analyze(conversation);
-        } catch (RuntimeException exception) {
-            log.error("AI 意图识别失败 executionId={}: {}", conversation.getExecutionId(), exception.getMessage(), exception);
-            ConversationResult failed = new ConversationResult(IntentStatus.FAILED, List.of(), exception.getMessage());
-            appendAssistant(conversation, failed.getMessage());
-            publish(conversation, null, AiEventType.FINAL_RESULT, failed.getMessage(), 100);
-            return failed;
-        }
-        log.info("AI 意图识别完成 executionId={}, count={}, intents={}", conversation.getExecutionId(),
-                analysis.getOrderedIntents().size(), analysis.getOrderedIntents().stream()
-                        .map(intent -> intent.getId() + ":" + intent.getCode()).toList());
-        loadRequestedHistory(conversation, analysis.getContextRequirement());
-        publish(conversation, null, AiEventType.INTENT_ANALYZING, "需求理解完成，共识别到 " + analysis.getOrderedIntents().size() + " 个任务", 10);
-        publish(conversation, null, AiEventType.INTENT_DETECTED, "识别到需求：" + intentSummary(analysis.getOrderedIntents()), 12,
-                java.util.Map.of("intents", analysis.getOrderedIntents()));
-        publish(conversation, null, AiEventType.QUEUE_CREATED, "已构建任务依赖图，将按依赖就绪并行执行：" + intentSummary(analysis.getOrderedIntents()), 15,
-                java.util.Map.of("intentIds", analysis.getOrderedIntents().stream().map(IntentCandidate::getId).toList(),
-                        "tasks", analysis.getOrderedIntents().stream().map(IntentCandidate::getDescription).toList()));
-        if (analysis.requiresClarification()) {
-            publish(conversation, null, AiEventType.WAITING_USER, analysis.getClarificationQuestion(), 10);
-            ConversationResult result = new ConversationResult(IntentStatus.WAITING_USER, List.of(), analysis.getClarificationQuestion());
-            appendAssistant(conversation, result.getMessage());
-            return result;
-        }
-        if (analysis.getOrderedIntents().isEmpty()) {
-            ConversationResult result = new ConversationResult(IntentStatus.FAILED, List.of(), "未识别出可执行意图");
-            appendAssistant(conversation, result.getMessage());
-            publish(conversation, null, AiEventType.FINAL_RESULT, result.getMessage(), 100);
-            return result;
-        }
+        ExecutionSnapshot saved = loadCheckpoint(conversation);
+        if (saved != null && saved.getFinalResult() != null) return saved.getFinalResult();
         AiExecutionContext context = new AiExecutionContext(conversation);
-        List<IntentResult> results = new ArrayList<>();
-        ExecutionPlan plan = ExecutionPlan.from(conversation.getExecutionId(), analysis.getOrderedIntents());
+        List<IntentResult> results;
+        ExecutionPlan plan;
+        if (saved == null) {
+            preloadAnalysisHistory(conversation);
+            appendUser(conversation);
+            publish(conversation, null, AiEventType.CONVERSATION_STARTED, "开始处理", 0);
+            IntentAnalysis analysis;
+            try {
+                analysis = intentFactory.analyze(conversation);
+            } catch (RuntimeException exception) {
+                log.error("AI 意图识别失败 executionId={}: {}", conversation.getExecutionId(), exception.getMessage(), exception);
+                ConversationResult failed = new ConversationResult(IntentStatus.FAILED, List.of(), exception.getMessage());
+                appendAssistant(conversation, failed.getMessage());
+                publish(conversation, null, AiEventType.FINAL_RESULT, failed.getMessage(), 100);
+                return failed;
+            }
+            log.info("AI 意图识别完成 executionId={}, count={}, intents={}", conversation.getExecutionId(),
+                    analysis.getOrderedIntents().size(), analysis.getOrderedIntents().stream()
+                            .map(intent -> intent.getId() + ":" + intent.getCode()).toList());
+            loadRequestedHistory(conversation, analysis.getContextRequirement());
+            publish(conversation, null, AiEventType.INTENT_ANALYZING, "需求理解完成，共识别到 " + analysis.getOrderedIntents().size() + " 个任务", 10);
+            publish(conversation, null, AiEventType.INTENT_DETECTED, "识别到需求：" + intentSummary(analysis.getOrderedIntents()), 12,
+                    java.util.Map.of("intents", analysis.getOrderedIntents()));
+            publish(conversation, null, AiEventType.QUEUE_CREATED, "已构建任务依赖图，将按依赖就绪并行执行：" + intentSummary(analysis.getOrderedIntents()), 15,
+                    java.util.Map.of("intentIds", analysis.getOrderedIntents().stream().map(IntentCandidate::getId).toList(),
+                            "tasks", analysis.getOrderedIntents().stream().map(IntentCandidate::getDescription).toList()));
+            if (analysis.requiresClarification()) {
+                publish(conversation, null, AiEventType.WAITING_USER, analysis.getClarificationQuestion(), 10);
+                ConversationResult result = new ConversationResult(IntentStatus.WAITING_USER, List.of(), analysis.getClarificationQuestion());
+                appendAssistant(conversation, result.getMessage());
+                return result;
+            }
+            if (analysis.getOrderedIntents().isEmpty()) {
+                ConversationResult result = new ConversationResult(IntentStatus.FAILED, List.of(), "未识别出可执行意图");
+                appendAssistant(conversation, result.getMessage());
+                publish(conversation, null, AiEventType.FINAL_RESULT, result.getMessage(), 100);
+                return result;
+            }
+            results = new ArrayList<>();
+            plan = ExecutionPlan.from(conversation.getExecutionId(), analysis.getOrderedIntents());
+            saveCheckpoint(conversation, plan, results, null);
+        } else {
+            plan = saved.getPlan();
+            results = new ArrayList<>(saved.getResults() == null ? List.of() : saved.getResults());
+            results.forEach(context::addResult);
+            for (PlanNode node : plan.getNodes().values()) {
+                if (node.getStatus() != PlanNodeStatus.RUNNING) continue;
+                node.setStatus(PlanNodeStatus.WAITING_USER);
+                IntentResult uncertain = IntentResult.waitingUser(node.getIntent(),
+                        "执行在工具调用期间中断，需确认外部操作结果后继续");
+                context.addResult(uncertain);
+                replaceResult(results, uncertain);
+            }
+            saveCheckpoint(conversation, plan, results, null);
+        }
         while (true) {
             SteeringBatch steeringBatch = steering.drain();
             if (!steeringBatch.isEmpty()) {
                 applySteering(steeringBatch, plan, context, results, conversation);
+                saveCheckpoint(conversation, plan, results, null);
             }
             if (plan.pendingNodes().isEmpty()) {
                 if (steering.sealIfEmpty()) break;
@@ -166,11 +201,16 @@ public class AiExecutionEngine {
                 IntentResult failed = IntentResult.failed(deadlocked.getIntent(), "执行计划没有可运行节点");
                 context.addResult(failed);
                 replaceResult(results, failed);
+                saveCheckpoint(conversation, plan, results, null);
                 continue;
             }
             Map<String, CompletableFuture<IntentResult>> running = new LinkedHashMap<>();
             for (PlanNode node : readyNodes) {
                 node.setStatus(PlanNodeStatus.RUNNING);
+            }
+            // 先持久化不确定状态，再允许任何可能有外部副作用的工具启动。
+            saveCheckpoint(conversation, plan, results, null);
+            for (PlanNode node : readyNodes) {
                 IntentCandidate intent = node.getIntent();
                 try {
                     running.put(intent.getId(), CompletableFuture.supplyAsync(() ->
@@ -182,6 +222,7 @@ public class AiExecutionEngine {
                     node.setStatus(PlanNodeStatus.FAILED);
                 }
             }
+            saveCheckpoint(conversation, plan, results, null);
             running.forEach((id, future) -> {
                 IntentResult result;
                 try {
@@ -196,6 +237,7 @@ public class AiExecutionEngine {
                     PlanNode node = plan.getNodes().get(id);
                     node.setStatus(toNodeStatus(result));
                     attemptReplan(plan, node, result, context, results);
+                    saveCheckpoint(conversation, plan, results, null);
                 }
             });
         }
@@ -207,6 +249,7 @@ public class AiExecutionEngine {
                 finalResult.getStatus(), results.size(), finalResult.getMessage());
         publish(conversation, null, AiEventType.FINAL_RESULT, finalResult.getMessage(), 100);
         appendAssistant(conversation, finalResult.getMessage());
+        saveCheckpoint(conversation, plan, results, finalResult);
         return finalResult;
     }
 
@@ -546,6 +589,37 @@ public class AiExecutionEngine {
     private void replaceResult(List<IntentResult> results, IntentResult value) {
         results.removeIf(item -> value.getIntentId().equals(item.getIntentId()));
         results.add(value);
+    }
+
+    private ExecutionSnapshot loadCheckpoint(ConversationContext conversation) {
+        if (executionCheckpointStore == null || conversation.getConversationId() == null
+                || conversation.getConversationId().isBlank()) return null;
+        return executionCheckpointStore.load(conversation.getConversationId(), conversation.getExecutionId())
+                .map(value -> {
+                    try {
+                        ExecutionSnapshot snapshot = checkpointMapper.readValue(value, ExecutionSnapshot.class);
+                        if (snapshot.getPlan() == null) throw new IllegalStateException("执行检查点缺少计划");
+                        return snapshot;
+                    } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+                        throw new IllegalStateException("执行检查点无法解析", exception);
+                    }
+                }).orElse(null);
+    }
+
+    private void saveCheckpoint(ConversationContext conversation, ExecutionPlan plan,
+                                List<IntentResult> results, ConversationResult finalResult) {
+        if (executionCheckpointStore == null || conversation.getConversationId() == null
+                || conversation.getConversationId().isBlank()) return;
+        ExecutionSnapshot snapshot = new ExecutionSnapshot();
+        snapshot.setPlan(plan);
+        snapshot.setResults(List.copyOf(results));
+        snapshot.setFinalResult(finalResult);
+        try {
+            executionCheckpointStore.save(conversation.getConversationId(), conversation.getExecutionId(),
+                    checkpointMapper.writeValueAsString(snapshot));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException("执行检查点无法序列化", exception);
+        }
     }
 
     private PlanNodeStatus toNodeStatus(IntentResult result) {

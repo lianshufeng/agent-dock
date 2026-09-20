@@ -18,6 +18,7 @@ import com.github.agentdock.core.model.ConversationContext;
 import com.github.agentdock.core.model.ConversationResult;
 import com.github.agentdock.core.model.IntentDefinition;
 import com.github.agentdock.core.store.ChatHistoryStore;
+import com.github.agentdock.core.store.ExecutionCheckpointStore;
 import com.github.agentdock.core.loop.IntentLoopExecutor;
 import com.github.agentdock.core.loop.IntentLoopPlanner;
 import com.github.agentdock.core.task.TaskPlanner;
@@ -33,6 +34,8 @@ import com.github.agentdock.core.planning.PlanReplanner;
 import com.github.agentdock.core.planning.NoopPlanReplanner;
 import com.github.agentdock.core.steering.ExecutionSteering;
 import com.github.agentdock.core.steering.SteeringPlanMode;
+import com.github.agentdock.core.memory.*;
+import com.github.agentdock.core.state.*;
 
 /**
  * AI 内核的自管理入口。业务项目只需注册自己的适配器和能力，不需要依赖 Spring。
@@ -44,6 +47,7 @@ public final class AiKernel {
     private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
     private final InMemoryAiEventPublisher eventPublisher = new InMemoryAiEventPublisher();
     private ChatHistoryStore chatHistoryStore;
+    private ExecutionCheckpointStore executionCheckpointStore;
     private IntentLoopPlanner intentLoopPlanner;
     private TaskPlanner taskPlanner;
     private CapabilityVisibilityPolicy capabilityVisibilityPolicy = new AllowAllCapabilityVisibilityPolicy();
@@ -54,6 +58,10 @@ public final class AiKernel {
     private CapabilityOutputCombiner capabilityOutputCombiner = new DefaultCapabilityOutputCombiner();
     private ModelUsageRecorder modelUsageRecorder = NoopModelUsageRecorder.INSTANCE;
     private ContextAssembler contextAssembler = new DefaultContextAssembler();
+    private SessionMemoryStore sessionMemoryStore;
+    private SessionMemoryRecallPolicy sessionMemoryRecallPolicy = new SessionMemoryRecallPolicy() { };
+    private ConversationStateStore conversationStateStore;
+    private ConversationStatePolicy conversationStatePolicy = new ConversationStatePolicy() { };
     private TaskVerifier taskVerifier = new DefaultTaskVerifier();
     private TaskReplanner taskReplanner = new NoopTaskReplanner();
     private PlanReplanner planReplanner = new NoopPlanReplanner();
@@ -94,8 +102,50 @@ public final class AiKernel {
 
     public AiKernel registerContextAssembler(ContextAssembler assembler) {
         this.contextAssembler = java.util.Objects.requireNonNull(assembler, "上下文组装器不能为空");
-        this.intentFactory.setContextAssembler(assembler);
+        refreshContextAssembler();
         return this;
+    }
+
+    /** 可选检查点；未注册时保留原有一次调用内的执行方式。 */
+    public AiKernel registerExecutionCheckpointStore(ExecutionCheckpointStore store) {
+        this.executionCheckpointStore = java.util.Objects.requireNonNull(store, "执行检查点存储不能为空");
+        return this;
+    }
+
+    /** 会话记忆由宿主存储；未注册时不进行任何记忆查询。 */
+    public AiKernel registerSessionMemoryStore(SessionMemoryStore store) {
+        this.sessionMemoryStore = java.util.Objects.requireNonNull(store, "会话记忆存储不能为空");
+        refreshContextAssembler();
+        return this;
+    }
+
+    public AiKernel registerSessionMemoryRecallPolicy(SessionMemoryRecallPolicy policy) {
+        this.sessionMemoryRecallPolicy = java.util.Objects.requireNonNull(policy, "会话记忆召回策略不能为空");
+        refreshContextAssembler();
+        return this;
+    }
+
+    public AiKernel registerConversationStateStore(ConversationStateStore store) {
+        this.conversationStateStore = java.util.Objects.requireNonNull(store, "会话状态存储不能为空");
+        refreshContextAssembler();
+        return this;
+    }
+
+    public AiKernel registerConversationStatePolicy(ConversationStatePolicy policy) {
+        this.conversationStatePolicy = java.util.Objects.requireNonNull(policy, "会话状态读取策略不能为空");
+        refreshContextAssembler();
+        return this;
+    }
+
+    private ContextAssembler effectiveContextAssembler() {
+        ContextAssembler effective = sessionMemoryStore == null ? contextAssembler
+                : new SessionMemoryContextAssembler(contextAssembler, sessionMemoryStore, sessionMemoryRecallPolicy);
+        return conversationStateStore == null ? effective
+                : new ConversationStateContextAssembler(effective, conversationStateStore, conversationStatePolicy);
+    }
+
+    private void refreshContextAssembler() {
+        intentFactory.setContextAssembler(effectiveContextAssembler());
     }
 
     public AiKernel registerTaskVerifier(TaskVerifier verifier) {
@@ -193,13 +243,15 @@ public final class AiKernel {
     public ConversationResult execute(ConversationContext context, ExecutionSteering steering) {
         java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);
         context.setModelUsageRecorder(modelUsageRecorder);
+        ContextAssembler effectiveAssembler = effectiveContextAssembler();
         CapabilityInvoker invoker = capabilityInvoker == null
                 ? new DefaultCapabilityInvoker(capabilityRegistry, capabilityVisibilityPolicy) : capabilityInvoker;
         return new AiExecutionEngine(intentFactory, new DefaultResultAggregator(), resultSummarizer, eventPublisher,
                 new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
                         capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
-                        capabilityCandidateSelector, contextAssembler, taskVerifier, taskReplanner),
-                chatHistoryStore, executionMode, planReplanner, contextAssembler, steeringPlanMode)
+                        capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner),
+                chatHistoryStore, executionMode, planReplanner, effectiveAssembler, steeringPlanMode,
+                executionCheckpointStore)
                 .execute(context, steering == null ? ExecutionSteering.disabled() : steering);
     }
 

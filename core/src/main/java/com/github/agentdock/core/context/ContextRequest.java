@@ -1,6 +1,8 @@
 package com.github.agentdock.core.context;
 
 import com.github.agentdock.core.model.*;
+import com.github.agentdock.core.memory.SessionMemory;
+import com.github.agentdock.core.state.ConversationState;
 import lombok.Data;
 
 import java.util.List;
@@ -18,4 +20,6 @@ public final class ContextRequest {
     private List<CapabilityDefinition> capabilities = List.of();
     private TaskVerification verification;
     private Object executionPlan;
+    private List<SessionMemory> sessionMemories = List.of();
+    private List<ConversationState> conversationStates = List.of();
 }

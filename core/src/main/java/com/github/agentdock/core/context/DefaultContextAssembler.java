@@ -73,6 +73,14 @@ public final class DefaultContextAssembler implements ContextAssembler {
             add(items, "execution-plan", ContextSourceType.EXECUTION_PLAN, null, request.getExecutionPlan(),
                     95, ContextTrustLevel.SYSTEM, false, maxCharacters, System.currentTimeMillis());
         }
+        if (request.getSessionMemories() != null) request.getSessionMemories().forEach(memory ->
+                add(items, "session-memory-" + memory.key(), ContextSourceType.SESSION_MEMORY,
+                        memory.key(), memory.value(), 96, ContextTrustLevel.USER_PROVIDED,
+                        false, maxCharacters, memory.updatedAt()));
+        if (request.getConversationStates() != null) request.getConversationStates().forEach(state ->
+                add(items, "session-state-" + state.key(), ContextSourceType.SESSION_STATE,
+                        state.key(), state.value(), 97, ContextTrustLevel.HOST_VERIFIED,
+                        false, maxCharacters, state.updatedAt()));
         if (request.getPreviousIntentResults() != null) request.getPreviousIntentResults().forEach((id, result) ->
                 add(items, "dependency-" + id, ContextSourceType.DEPENDENCY_RESULT, id, result,
                         90, ContextTrustLevel.TOOL_VERIFIED, false, maxCharacters, System.currentTimeMillis()));
