@@ -125,6 +125,13 @@ public class AiExecutionEngine {
         log.info("AI 执行开始 executionId={}, conversationId={}, inputLength={}", conversation.getExecutionId(),
                 conversation.getConversationId(), conversation.getUserInput() == null ? 0 : conversation.getUserInput().length());
         ExecutionSnapshot saved = loadCheckpoint(conversation);
+        Map<String, String> timeAnchor = saved != null && saved.getPlan().getRequestTimeAnchor() != null
+                && !saved.getPlan().getRequestTimeAnchor().isEmpty()
+                ? saved.getPlan().getRequestTimeAnchor()
+                : RequestTimeAnchor.from(conversation.getAttributes());
+        Map<String, Object> attributes = new LinkedHashMap<>(conversation.getAttributes() == null ? Map.of() : conversation.getAttributes());
+        attributes.put("requestTimeAnchor", timeAnchor);
+        conversation.setAttributes(Map.copyOf(attributes));
         if (saved != null && saved.getFinalResult() != null) return saved.getFinalResult();
         AiExecutionContext context = new AiExecutionContext(conversation);
         List<IntentResult> results;
@@ -167,6 +174,8 @@ public class AiExecutionEngine {
             }
             results = new ArrayList<>();
             plan = ExecutionPlan.from(conversation.getExecutionId(), analysis.getOrderedIntents());
+            plan.setDeferredBranches(new ArrayList<>(analysis.getDeferredBranches()));
+            plan.setRequestTimeAnchor(timeAnchor);
             saveCheckpoint(conversation, plan, results, null);
         } else {
             plan = saved.getPlan();
@@ -188,6 +197,7 @@ public class AiExecutionEngine {
                 applySteering(steeringBatch, plan, context, results, conversation);
                 saveCheckpoint(conversation, plan, results, null);
             }
+            resolveDeferredBranches(plan, context, results, conversation);
             if (plan.pendingNodes().isEmpty()) {
                 if (steering.sealIfEmpty()) break;
                 continue;
@@ -244,13 +254,82 @@ public class AiExecutionEngine {
         results.sort(java.util.Comparator.comparingInt(result -> plan.orderedIntents().stream()
                 .map(IntentCandidate::getId).toList().indexOf(result.getIntentId())));
         ConversationResult finalResult = aggregator.aggregate(results);
+        List<DeferredBranch> unresolvedBranches = plan.getDeferredBranches().stream()
+                .filter(branch -> "UNKNOWN".equals(branch.getResolution())
+                        || "TRIGGER_FAILED".equals(branch.getResolution())).toList();
+        if (!unresolvedBranches.isEmpty()) finalResult.setStatus(IntentStatus.WAITING_USER);
         finalResult.setMessage(summarizer.summarize(conversation, finalResult));
+        if (!unresolvedBranches.isEmpty()) finalResult.setMessage("条件分支暂无法确定：" + unresolvedBranches.stream()
+                .map(branch -> branch.getId() + "（" + displayText(branch.getResolutionReason(), "前置结果不足") + "）")
+                .collect(java.util.stream.Collectors.joining("；")));
         log.info("AI 执行结束 executionId={}, status={}, resultCount={}, message={}", conversation.getExecutionId(),
                 finalResult.getStatus(), results.size(), finalResult.getMessage());
         publish(conversation, null, AiEventType.FINAL_RESULT, finalResult.getMessage(), 100);
         appendAssistant(conversation, finalResult.getMessage());
         saveCheckpoint(conversation, plan, results, finalResult);
         return finalResult;
+    }
+
+    private void resolveDeferredBranches(ExecutionPlan plan, AiExecutionContext context,
+                                         List<IntentResult> results, ConversationContext conversation) {
+        for (DeferredBranch branch : plan.getDeferredBranches()) {
+            if (branch.getResolution() != null) continue;
+            PlanNode trigger = plan.getNodes().get(branch.getTriggerIntentId());
+            if (trigger == null || trigger.getStatus() == PlanNodeStatus.PENDING
+                    || trigger.getStatus() == PlanNodeStatus.RUNNING) continue;
+            if (trigger.getStatus() != PlanNodeStatus.SUCCESS) {
+                branch.setResolution("TRIGGER_FAILED");
+                branch.setResolutionReason("前置任务未成功");
+                saveCheckpoint(conversation, plan, results, null);
+                continue;
+            }
+            IntentResult triggerResult = context.getResults().get(branch.getTriggerIntentId());
+            if (triggerResult == null) {
+                branch.setResolution("UNKNOWN");
+                branch.setResolutionReason("缺少前置任务结果");
+                saveCheckpoint(conversation, plan, results, null);
+                continue;
+            }
+            try {
+                DeferredBranchDecision decision = intentFactory.resolveDeferredBranch(conversation, plan, branch, triggerResult);
+                if (decision.getSelectedChoiceId() == null || decision.getSelectedChoiceId().isBlank()) {
+                    branch.setResolution("UNKNOWN");
+                    branch.setResolutionReason(displayText(decision.getReason(), "前置结果不足以判断条件"));
+                    saveCheckpoint(conversation, plan, results, null);
+                    continue;
+                }
+                List<IntentCandidate> added = rebaseIntents(decision.getCandidates(), plan.getVersion() + 1);
+                List<PlanPatchOperation> operations = new ArrayList<>();
+                for (IntentCandidate intent : added) {
+                    PlanPatchOperation operation = new PlanPatchOperation();
+                    operation.setType(PlanPatchType.ADD_NODE);
+                    operation.setNode(intent);
+                    operation.setDependsOn(intent.getDependsOn());
+                    operations.add(operation);
+                }
+                PlanPatch patch = new PlanPatch();
+                patch.setReason(decision.getReason());
+                patch.setOperations(operations);
+                planPatchApplier.apply(plan, patch, intentFactory.intentDefinitions().stream()
+                        .map(IntentDefinition::getCode).collect(java.util.stream.Collectors.toSet()),
+                        Integer.MAX_VALUE, false);
+                branch.setSelectedChoiceId(decision.getSelectedChoiceId());
+                branch.setResolution("SELECTED");
+                branch.setResolutionReason(decision.getReason());
+                publish(conversation, branch.getTriggerIntentId(), AiEventType.PLAN_VERSION_CREATED,
+                        "已根据前置结果追加后续任务", 18,
+                        Map.of("branchId", branch.getId(), "selectedChoiceId", branch.getSelectedChoiceId(),
+                                "addedNodeIds", added.stream().map(IntentCandidate::getId).toList(),
+                                "reason", decision.getReason() == null ? "" : decision.getReason()));
+                saveCheckpoint(conversation, plan, results, null);
+            } catch (RuntimeException exception) {
+                branch.setResolution("UNKNOWN");
+                branch.setResolutionReason("条件判断或计划校验失败");
+                publish(conversation, branch.getTriggerIntentId(), AiEventType.PLAN_PATCH_REJECTED,
+                        "条件分支无法确定：" + exception.getMessage(), 18);
+                saveCheckpoint(conversation, plan, results, null);
+            }
+        }
     }
 
     private void applySteering(SteeringBatch batch, ExecutionPlan plan, AiExecutionContext context,

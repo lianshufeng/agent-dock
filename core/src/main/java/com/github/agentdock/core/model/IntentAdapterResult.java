@@ -7,6 +7,7 @@ import lombok.Data;
 @Data
 public class IntentAdapterResult {
     private List<IntentCandidate> candidates; private ContextRequirement contextRequirement; private String clarificationQuestion;
+    private List<DeferredBranch> deferredBranches = List.of();
     public IntentAdapterResult() { }
     public IntentAdapterResult(List<IntentCandidate> candidates, ContextRequirement contextRequirement, String clarificationQuestion) { this.candidates=candidates==null?List.of():List.copyOf(candidates); this.contextRequirement=contextRequirement==null?ContextRequirement.NONE:contextRequirement; this.clarificationQuestion=clarificationQuestion; }
 

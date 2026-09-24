@@ -278,6 +278,18 @@ public final class IntentLoopExecutor {
             }
             if (decision == null) return IntentResult.failed(intent, "Loop 规划器未返回决策");
             if (decision.getStatus() == null) return IntentResult.failed(intent, "Loop 规划器未返回有效状态");
+            if (decision.getToolInvocations() != null) {
+                List<CapabilityInvocation> validInvocations = new ArrayList<>();
+                for (CapabilityInvocation invocation : decision.getToolInvocations()) {
+                    if (invocation == null || invocation.getCapabilityCode() == null
+                            || invocation.getCapabilityCode().isBlank()) continue;
+                    if (invocation.getDependsOnInvocationIds() != null && !intent.getDependsOn().isEmpty())
+                        invocation.setDependsOnInvocationIds(invocation.getDependsOnInvocationIds().stream()
+                                .filter(id -> !intent.getDependsOn().contains(id)).toList());
+                    validInvocations.add(invocation);
+                }
+                decision.setToolInvocations(validInvocations);
+            }
             log.info("AI 规划结果 executionId={}, intentId={}, iteration={}, status={}, toolCount={}",
                     context.getConversation().getExecutionId(), intent.getId(), iteration + 1, decision.getStatus(),
                     decision.getToolInvocations() == null ? 0 : decision.getToolInvocations().size());

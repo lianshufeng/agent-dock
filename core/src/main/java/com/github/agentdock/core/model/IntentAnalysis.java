@@ -8,6 +8,7 @@ import lombok.Data;
 @Data
 public class IntentAnalysis {
     private List<IntentCandidate> orderedIntents; private ContextRequirement contextRequirement; private String clarificationQuestion;
+    private List<DeferredBranch> deferredBranches = List.of();
     public IntentAnalysis() { }
     public IntentAnalysis(List<IntentCandidate> orderedIntents, ContextRequirement contextRequirement, String clarificationQuestion) {
         this.orderedIntents=orderedIntents==null?List.of():List.copyOf(orderedIntents); this.contextRequirement=contextRequirement==null?ContextRequirement.NONE:contextRequirement; this.clarificationQuestion=clarificationQuestion;

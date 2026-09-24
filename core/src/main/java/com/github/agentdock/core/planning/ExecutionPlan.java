@@ -1,6 +1,7 @@
 package com.github.agentdock.core.planning;
 
 import com.github.agentdock.core.model.IntentCandidate;
+import com.github.agentdock.core.model.DeferredBranch;
 import lombok.Data;
 
 import java.util.*;
@@ -13,6 +14,8 @@ public final class ExecutionPlan {
     private int replanCount;
     private int steeringCount;
     private LinkedHashMap<String, PlanNode> nodes = new LinkedHashMap<>();
+    private List<DeferredBranch> deferredBranches = new ArrayList<>();
+    private Map<String, String> requestTimeAnchor = Map.of();
 
     public static ExecutionPlan from(String executionId, List<IntentCandidate> intents) {
         ExecutionPlan plan = new ExecutionPlan();

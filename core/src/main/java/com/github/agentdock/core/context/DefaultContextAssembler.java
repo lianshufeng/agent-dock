@@ -47,6 +47,10 @@ public final class DefaultContextAssembler implements ContextAssembler {
         if (conversation != null) {
             add(items, "user-input", ContextSourceType.USER_INPUT, null, conversation.getUserInput(),
                     100, ContextTrustLevel.USER_PROVIDED, false, maxCharacters, System.currentTimeMillis());
+            if (conversation.getAttributes() != null)
+                add(items, "request-time-anchor", ContextSourceType.HOST_ATTRIBUTE, null,
+                        conversation.getAttributes().get("requestTimeAnchor"),
+                        99, ContextTrustLevel.HOST_VERIFIED, false, maxCharacters, System.currentTimeMillis());
             if (conversation.getAttributes() != null && !conversation.getAttributes().isEmpty()) {
                 add(items, "host-attributes", ContextSourceType.HOST_ATTRIBUTE, null, conversation.getAttributes(),
                         85, ContextTrustLevel.HOST_VERIFIED, true, maxCharacters, System.currentTimeMillis());

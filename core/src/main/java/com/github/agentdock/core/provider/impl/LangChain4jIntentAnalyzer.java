@@ -11,6 +11,10 @@ import com.github.agentdock.core.provider.SteeringAnalysisContract;
 import com.github.agentdock.core.provider.ObservedModelCall;
 import com.github.agentdock.core.steering.SteeringAdapterResult;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ResponseFormat;
+import dev.langchain4j.model.chat.request.ResponseFormatType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.List;
@@ -45,6 +49,8 @@ public class LangChain4jIntentAnalyzer implements LlmIntentAnalyzer {
                 %s
                 priority 数值越大越优先；存在先后依赖时，在 dependsOn 中填写前置意图的 id。
                 连续任务按目标拆分；后续目标需要前一步的数据时必须声明 dependsOn，不生成参数或结果字段路径。
+                若用户要求按前置结果在互斥目标中选择，只把前置目标放入 candidates，把条件与后续目标放入 deferredBranches；不得提前把任一分支目标放入 candidates。
+                相对日期须以受控上下文中的请求本地日期为准，description 和 expectedResult 使用解析后的明确日期。
                 description 和 expectedResult 必须保留用户指定的关键实体、地点和数值，以便后续单意图执行准确区分不同目标。
                 每个意图必须返回 progressText：面向用户的无主语、拟人化、简短进度文案，例如“开始查找相关信息”；不要写意图类型、编码、工具名或 JSON。
                 只按用户希望达成的目标识别意图，不推断系统具有哪些能力，不选择工具，也不把实现目标所需的内部步骤识别成额外意图。
@@ -105,6 +111,38 @@ public class LangChain4jIntentAnalyzer implements LlmIntentAnalyzer {
         } catch (Exception exception) {
             throw new IllegalStateException("补充输入计划分析失败", exception);
         }
+    }
+
+    @Override
+    public DeferredBranchDecision resolveDeferredBranch(ConversationContext context, String intentCatalog,
+            ContextSnapshot snapshot, DeferredBranch branch, IntentResult triggerResult) {
+        String prompt = """
+                你是条件计划判断器。只能根据前置意图的真实结果，判断下面哪一个互斥条件成立。
+                不得把用户的假设当成事实；地点或日期不匹配、证据不足、条件无法确定时，selectedChoiceId 返回空字符串，candidates 返回空数组。
+                只生成选中目标所需的意图；不得生成未选分支。新增意图的 dependsOn 必须包含前置意图 ID。
+                相对日期按时间锚点解释，description 和 expectedResult 使用明确日期。
+                只能选用意图目录中的 code。只返回 JSON：
+                {"selectedChoiceId":"选择 ID 或空字符串","reason":"依据或无法判断原因","candidates":[{"id":"唯一 ID","code":"意图编码","description":"目标","progressText":"进度","expectedResult":"可验证结果","confidence":1.0,"priority":0,"complexity":"SIMPLE|COMPLEX","dependsOn":["前置意图 ID"]}]}
+                意图目录：%s
+                待决分支：%s
+                前置真实结果：%s
+                受控上下文：%s
+                原始用户输入：%s
+                """.formatted(intentCatalog, json(branch), json(triggerResult), snapshotText(snapshot), context.getUserInput());
+        try {
+            String response = ObservedModelCall.chat(chatModel,
+                    ChatRequest.builder().messages(UserMessage.from(prompt))
+                            .responseFormat(ResponseFormat.builder().type(ResponseFormatType.JSON).build()).build(),
+                    context, branch.getTriggerIntentId(), "deferred-branch", 0).aiMessage().text();
+            return objectMapper.readValue(response, DeferredBranchDecision.class);
+        } catch (Exception exception) {
+            throw new IllegalStateException("条件分支判断失败", exception);
+        }
+    }
+
+    private String json(Object value) {
+        try { return objectMapper.writeValueAsString(value); }
+        catch (Exception exception) { throw new IllegalStateException("条件分支上下文序列化失败", exception); }
     }
 
     private String snapshotText(ContextSnapshot snapshot) {

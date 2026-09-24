@@ -34,6 +34,17 @@ public final class IntentAnalysisContract implements StructuredOutputContract {
                             put(new SchemaField("contextRequirement", "当前意图需要的上下文"),
                                     contextRequirementValue());
                         }})));
+        put(new SchemaField("deferredBranches", "仅当后续目标取决于前置结果时填写；分支目标暂不放入 candidates"),
+                new SchemaArrayValue("互斥条件分支", new SchemaObjectValue(new LinkedHashMap<>() {{
+                    put(new SchemaField("id", "分支组唯一 ID"), new SchemaStringValue("本次分析内唯一"));
+                    put(new SchemaField("triggerIntentId", "先执行的意图 ID"), new SchemaStringValue("必须引用 candidates 中的意图"));
+                    put(new SchemaField("choices", "互斥的候选目标"), new SchemaArrayValue("至少两个选择",
+                            new SchemaObjectValue(new LinkedHashMap<>() {{
+                                put(new SchemaField("id", "选择 ID"), new SchemaStringValue("组内唯一"));
+                                put(new SchemaField("condition", "基于前置真实结果判断的条件"), new SchemaStringValue("保留用户原始条件"));
+                                put(new SchemaField("goal", "条件成立后才执行的用户目标"), new SchemaStringValue("保留地点和数值"));
+                            }})));
+                }})));
         put(new SchemaField("contextRequirement", "本次分析整体需要的上下文"),
                 contextRequirementValue());
         put(new SchemaField("clarificationQuestion", "需要用户补充回答的问题"),
@@ -60,7 +71,7 @@ public final class IntentAnalysisContract implements StructuredOutputContract {
 
     @Override
     public String promptDescription() {
-        return "只返回候选意图、上下文召回要求和澄清问题，不选择工具，也不生成工具参数。";
+        return "只返回当前可执行候选意图、待决条件分支、上下文召回要求和澄清问题，不选择工具，也不生成工具参数。";
     }
 
     private static SchemaObjectValue contextRequirementValue() {

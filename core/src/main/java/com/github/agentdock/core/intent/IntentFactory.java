@@ -156,7 +156,48 @@ public class IntentFactory {
         }
         validateDependencies(candidates, externalDependencyIds);
         List<IntentCandidate> ordered = topologicalSort(candidates);
-        return new IntentAnalysis(ordered, requirement, analysis.getClarificationQuestion());
+        List<DeferredBranch> branches = Optional.ofNullable(analysis.getDeferredBranches()).orElse(List.of());
+        Set<String> candidateIds = ordered.stream().map(IntentCandidate::getId).collect(java.util.stream.Collectors.toSet());
+        Set<String> branchIds = new HashSet<>();
+        for (DeferredBranch branch : branches) {
+            if (branch == null || branch.getId() == null || !branchIds.add(branch.getId())
+                    || !candidateIds.contains(branch.getTriggerIntentId())
+                    || branch.getChoices() == null || branch.getChoices().size() < 2)
+                throw new IllegalArgumentException("条件分支无效");
+            Set<String> choiceIds = new HashSet<>();
+            for (DeferredBranch.Choice choice : branch.getChoices()) {
+                if (choice == null || choice.getId() == null || !choiceIds.add(choice.getId())
+                        || choice.getCondition() == null || choice.getCondition().isBlank()
+                        || choice.getGoal() == null || choice.getGoal().isBlank())
+                    throw new IllegalArgumentException("条件分支选择无效");
+            }
+        }
+        IntentAnalysis result = new IntentAnalysis(ordered, requirement, analysis.getClarificationQuestion());
+        result.setDeferredBranches(List.copyOf(branches));
+        return result;
+    }
+
+    public DeferredBranchDecision resolveDeferredBranch(ConversationContext context,
+            com.github.agentdock.core.planning.ExecutionPlan plan, DeferredBranch branch, IntentResult triggerResult) {
+        ContextRequest request = new ContextRequest();
+        request.setPhase(ContextPhase.INTENT_ANALYSIS);
+        request.setConversation(context);
+        request.setExecutionPlan(plan);
+        request.setPreviousIntentResults(Map.of(branch.getTriggerIntentId(), triggerResult));
+        DeferredBranchDecision decision = analyzer == null ? null : analyzer.resolveDeferredBranch(context,
+                buildIntentCatalog(), contextAssembler.assemble(request), branch, triggerResult);
+        if (decision == null || decision.getSelectedChoiceId() == null || decision.getSelectedChoiceId().isBlank())
+            return new DeferredBranchDecision();
+        if (branch.getChoices().stream().noneMatch(choice -> choice.getId().equals(decision.getSelectedChoiceId())))
+            throw new IllegalArgumentException("模型选择了未登记的条件分支");
+        IntentAdapterResult selected = new IntentAdapterResult(decision.getCandidates(), ContextRequirement.NONE, null);
+        List<IntentCandidate> intents = normalize(context, selected, Set.of(branch.getTriggerIntentId())).getOrderedIntents();
+        if (intents.isEmpty()) throw new IllegalArgumentException("选中分支没有可执行意图");
+        for (IntentCandidate intent : intents) {
+            if (intent.getDependsOn().isEmpty()) intent.setDependsOn(List.of(branch.getTriggerIntentId()));
+        }
+        decision.setCandidates(intents);
+        return decision;
     }
 
     private IntentAdapterResult applyFallbacks(ConversationContext context, String intentCatalog) {

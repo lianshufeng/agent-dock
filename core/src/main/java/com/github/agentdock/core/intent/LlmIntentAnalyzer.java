@@ -3,6 +3,9 @@ package com.github.agentdock.core.intent;
 import com.github.agentdock.core.context.ContextSnapshot;
 import com.github.agentdock.core.model.ConversationContext;
 import com.github.agentdock.core.model.IntentAdapterResult;
+import com.github.agentdock.core.model.DeferredBranch;
+import com.github.agentdock.core.model.DeferredBranchDecision;
+import com.github.agentdock.core.model.IntentResult;
 import com.github.agentdock.core.steering.SteeringAdapterResult;
 
 /** LLM 供应商适配接口；AI 内核不绑定具体模型 SDK。 */
@@ -26,5 +29,11 @@ public interface LlmIntentAnalyzer {
         result.setCandidates(analysis == null ? java.util.List.of() : analysis.getCandidates());
         result.setClarificationQuestion(analysis == null ? null : analysis.getClarificationQuestion());
         return result;
+    }
+
+    /** 前置结果到达后选择一个待决目标；旧适配器保持安全的未决状态。 */
+    default DeferredBranchDecision resolveDeferredBranch(ConversationContext context, String intentCatalog,
+            ContextSnapshot snapshot, DeferredBranch branch, IntentResult triggerResult) {
+        return new DeferredBranchDecision();
     }
 }
