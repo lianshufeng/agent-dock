@@ -60,4 +60,23 @@ public final class AiExecutionContext {
     public AiExecutionContext forkForIntent() {
         return new AiExecutionContext(conversation, results, verifications);
     }
+
+    /** 为待决分支节点隔离未选目标，同时保留身份、附件、时间与事件记录。 */
+    public AiExecutionContext forkForIntent(String scopedInput) {
+        if (scopedInput == null || scopedInput.isBlank()) return forkForIntent();
+        ConversationContext scoped = new ConversationContext();
+        scoped.setConversationId(conversation.getConversationId());
+        scoped.setExecutionId(conversation.getExecutionId());
+        scoped.setUserId(conversation.getUserId());
+        scoped.setUserInput(scopedInput);
+        scoped.setImageUrls(conversation.getImageUrls());
+        scoped.setFileIds(conversation.getFileIds());
+        scoped.setAttachmentContents(conversation.getAttachmentContents());
+        scoped.setHistoryBefore(conversation.getHistoryBefore());
+        scoped.setHistory(conversation.getHistory());
+        scoped.setAttributes(conversation.getAttributes());
+        scoped.setEventPublisher(conversation.getEventPublisher());
+        scoped.setModelUsageRecorder(conversation.getModelUsageRecorder());
+        return new AiExecutionContext(scoped, results, verifications);
+    }
 }

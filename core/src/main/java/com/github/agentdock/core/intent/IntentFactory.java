@@ -162,7 +162,7 @@ public class IntentFactory {
         for (DeferredBranch branch : branches) {
             if (branch == null || branch.getId() == null || !branchIds.add(branch.getId())
                     || !candidateIds.contains(branch.getTriggerIntentId())
-                    || branch.getChoices() == null || branch.getChoices().size() < 2)
+                    || branch.getChoices() == null || branch.getChoices().isEmpty())
                 throw new IllegalArgumentException("条件分支无效");
             Set<String> choiceIds = new HashSet<>();
             for (DeferredBranch.Choice choice : branch.getChoices()) {
@@ -186,6 +186,11 @@ public class IntentFactory {
         request.setPreviousIntentResults(Map.of(branch.getTriggerIntentId(), triggerResult));
         DeferredBranchDecision decision = analyzer == null ? null : analyzer.resolveDeferredBranch(context,
                 buildIntentCatalog(), contextAssembler.assemble(request), branch, triggerResult);
+        if (decision != null && "NO_MATCH".equals(decision.getOutcome())) {
+            if (decision.getSelectedChoiceId() != null && !decision.getSelectedChoiceId().isBlank())
+                throw new IllegalArgumentException("未命中分支不能同时选择目标");
+            return decision;
+        }
         if (decision == null || decision.getSelectedChoiceId() == null || decision.getSelectedChoiceId().isBlank())
             return new DeferredBranchDecision();
         if (branch.getChoices().stream().noneMatch(choice -> choice.getId().equals(decision.getSelectedChoiceId())))

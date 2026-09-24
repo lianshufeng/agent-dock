@@ -224,7 +224,8 @@ public class AiExecutionEngine {
                 IntentCandidate intent = node.getIntent();
                 try {
                     running.put(intent.getId(), CompletableFuture.supplyAsync(() ->
-                            executeIntent(intent, plan.orderedIntents().size(), context, results.size()), DAG_EXECUTOR));
+                            executeIntent(intent, plan.orderedIntents().size(), context, results.size(),
+                                    scopedBranchInput(plan, intent)), DAG_EXECUTOR));
                 } catch (RejectedExecutionException exception) {
                     IntentResult rejected = IntentResult.failed(intent, "AI 执行资源已满，请稍后重试");
                     context.addResult(rejected);
@@ -292,6 +293,12 @@ public class AiExecutionEngine {
             }
             try {
                 DeferredBranchDecision decision = intentFactory.resolveDeferredBranch(conversation, plan, branch, triggerResult);
+                if ("NO_MATCH".equals(decision.getOutcome())) {
+                    branch.setResolution("NO_MATCH");
+                    branch.setResolutionReason(displayText(decision.getReason(), "条件均不满足"));
+                    saveCheckpoint(conversation, plan, results, null);
+                    continue;
+                }
                 if (decision.getSelectedChoiceId() == null || decision.getSelectedChoiceId().isBlank()) {
                     branch.setResolution("UNKNOWN");
                     branch.setResolutionReason(displayText(decision.getReason(), "前置结果不足以判断条件"));
@@ -314,6 +321,7 @@ public class AiExecutionEngine {
                         .map(IntentDefinition::getCode).collect(java.util.stream.Collectors.toSet()),
                         Integer.MAX_VALUE, false);
                 branch.setSelectedChoiceId(decision.getSelectedChoiceId());
+                branch.setAddedNodeIds(added.stream().map(IntentCandidate::getId).toList());
                 branch.setResolution("SELECTED");
                 branch.setResolutionReason(decision.getReason());
                 publish(conversation, branch.getTriggerIntentId(), AiEventType.PLAN_VERSION_CREATED,
@@ -330,6 +338,17 @@ public class AiExecutionEngine {
                 saveCheckpoint(conversation, plan, results, null);
             }
         }
+    }
+
+    private String scopedBranchInput(ExecutionPlan plan, IntentCandidate intent) {
+        for (DeferredBranch branch : plan.getDeferredBranches()) {
+            if (branch.getAddedNodeIds() == null || !branch.getAddedNodeIds().contains(intent.getId())) continue;
+            return branch.getChoices().stream()
+                    .filter(choice -> choice.getId().equals(branch.getSelectedChoiceId()))
+                    .map(choice -> choice.getGoal() + "\n当前任务：" + intent.getDescription())
+                    .findFirst().orElse(null);
+        }
+        return null;
     }
 
     private void applySteering(SteeringBatch batch, ExecutionPlan plan, AiExecutionContext context,
@@ -580,8 +599,8 @@ public class AiExecutionEngine {
     }
 
     private IntentResult executeIntent(IntentCandidate intent, int intentTotal,
-                                       AiExecutionContext sharedContext, int completedCount) {
-        AiExecutionContext context = sharedContext.forkForIntent();
+                                       AiExecutionContext sharedContext, int completedCount, String scopedInput) {
+        AiExecutionContext context = sharedContext.forkForIntent(scopedInput);
         ConversationContext conversation = context.getConversation();
         log.info("AI 开始执行意图 executionId={}, intentId={}, code={}, description={}", conversation.getExecutionId(),
                 intent.getId(), intent.getCode(), intent.getDescription());

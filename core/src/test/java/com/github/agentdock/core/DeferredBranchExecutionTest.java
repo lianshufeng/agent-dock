@@ -27,6 +27,49 @@ class DeferredBranchExecutionTest {
 
     @Test void wrongDateDoesNotSelectBranch() { assertBranch("2026-09-25 重庆不下雨", "", null, 1); }
 
+    @Test void singleConditionalBranchCanResolveNoMatch() {
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = new AiKernel().registerIntent(new IntentDefinition("TASK", "执行目标"))
+                .registerIntentAnalyzer(new LlmIntentAnalyzer() {
+                    @Override public IntentAdapterResult analyze(ConversationContext context, String catalog) {
+                        IntentAdapterResult result = new IntentAdapterResult(
+                                List.of(intent("check", "查询状态", List.of())), ContextRequirement.NONE, null);
+                        DeferredBranch branch = new DeferredBranch();
+                        branch.setId("optional-action"); branch.setTriggerIntentId("check");
+                        DeferredBranch.Choice choice = new DeferredBranch.Choice();
+                        choice.setId("act"); choice.setCondition("状态异常"); choice.setGoal("处理异常");
+                        branch.setChoices(List.of(choice)); result.setDeferredBranches(List.of(branch));
+                        return result;
+                    }
+                    @Override public DeferredBranchDecision resolveDeferredBranch(ConversationContext context,
+                            String catalog, ContextSnapshot snapshot, DeferredBranch branch, IntentResult result) {
+                        DeferredBranchDecision decision = new DeferredBranchDecision();
+                        decision.setOutcome("NO_MATCH"); decision.setReason("状态正常");
+                        return decision;
+                    }
+                })
+                .registerCapability(new AiCapability() {
+                    @Override public CapabilityDefinition definition() {
+                        return new CapabilityDefinition("MOCK", "查询状态", Map.of(), Map.of(), false,
+                                true, false, Duration.ofSeconds(5), 0, List.of()).terminal();
+                    }
+                    @Override public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                        calls.incrementAndGet(); return CapabilityResult.success("状态正常");
+                    }
+                })
+                .registerIntentLoopPlanner(request -> {
+                    IntentLoopDecision decision = new IntentLoopDecision();
+                    decision.setStatus(IntentLoopDecision.Status.CONTINUE);
+                    decision.setToolInvocations(List.of(new CapabilityInvocation("MOCK", Map.of())));
+                    decision.setCompleteAfterTools(true); return decision;
+                });
+        ConversationResult result = kernel.execute(new ConversationContext("sample", UUID.randomUUID().toString(),
+                "user", "检查状态，如果异常则处理", List.of(), Map.of()));
+        assertEquals(IntentStatus.SUCCESS, result.getStatus());
+        assertEquals(1, calls.get());
+        assertEquals(1, result.getIntentResults().size());
+    }
+
     @Test void timeAnchorUsesUserLocalDate() {
         Map<String, String> anchor = com.github.agentdock.core.context.RequestTimeAnchor.from(Map.of(
                 "runtimeEnvironment", Map.of("requestTimeUtc", "2026-09-25T16:10:00Z",
@@ -89,6 +132,7 @@ class DeferredBranchExecutionTest {
 
     private void assertBranch(String weather, String selected, String expectedSecond, int expectedCalls) {
         List<String> calls = Collections.synchronizedList(new ArrayList<>());
+        List<String> branchInputs = Collections.synchronizedList(new ArrayList<>());
         AtomicInteger decisions = new AtomicInteger();
         AiKernel kernel = new AiKernel().registerIntent(new IntentDefinition("TASK", "执行目标"))
                 .registerIntentAnalyzer(new LlmIntentAnalyzer() {
@@ -120,6 +164,7 @@ class DeferredBranchExecutionTest {
                     }
                     @Override public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
                         calls.add(intent.getDescription());
+                        if (!intent.getId().equals("weather")) branchInputs.add(context.getConversation().getUserInput());
                         return CapabilityResult.success(intent.getId().equals("weather") ? weather : intent.getDescription());
                     }
                 })
@@ -142,6 +187,14 @@ class DeferredBranchExecutionTest {
             assertEquals(IntentStatus.SUCCESS, result.getStatus());
             assertEquals(expectedSecond, calls.get(1));
             assertEquals(2, result.getIntentResults().size());
+            assertEquals(1, branchInputs.size());
+            if ("rain".equals(selected)) {
+                assertTrue(branchInputs.get(0).contains("火锅店"));
+                assertFalse(branchInputs.get(0).contains("朝天门"));
+            } else {
+                assertTrue(branchInputs.get(0).contains("朝天门"));
+                assertFalse(branchInputs.get(0).contains("火锅店"));
+            }
         }
     }
 

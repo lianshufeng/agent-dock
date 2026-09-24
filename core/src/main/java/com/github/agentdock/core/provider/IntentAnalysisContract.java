@@ -38,7 +38,7 @@ public final class IntentAnalysisContract implements StructuredOutputContract {
                 new SchemaArrayValue("互斥条件分支", new SchemaObjectValue(new LinkedHashMap<>() {{
                     put(new SchemaField("id", "分支组唯一 ID"), new SchemaStringValue("本次分析内唯一"));
                     put(new SchemaField("triggerIntentId", "先执行的意图 ID"), new SchemaStringValue("必须引用 candidates 中的意图"));
-                    put(new SchemaField("choices", "互斥的候选目标"), new SchemaArrayValue("至少两个选择",
+                    put(new SchemaField("choices", "互斥的候选目标"), new SchemaArrayValue("至少一个选择；可仅有一个 if 条件",
                             new SchemaObjectValue(new LinkedHashMap<>() {{
                                 put(new SchemaField("id", "选择 ID"), new SchemaStringValue("组内唯一"));
                                 put(new SchemaField("condition", "基于前置真实结果判断的条件"), new SchemaStringValue("保留用户原始条件"));

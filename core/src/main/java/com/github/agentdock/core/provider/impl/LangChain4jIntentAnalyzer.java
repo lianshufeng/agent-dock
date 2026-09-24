@@ -118,11 +118,11 @@ public class LangChain4jIntentAnalyzer implements LlmIntentAnalyzer {
             ContextSnapshot snapshot, DeferredBranch branch, IntentResult triggerResult) {
         String prompt = """
                 你是条件计划判断器。只能根据前置意图的真实结果，判断下面哪一个互斥条件成立。
-                不得把用户的假设当成事实；地点或日期不匹配、证据不足、条件无法确定时，selectedChoiceId 返回空字符串，candidates 返回空数组。
+                outcome 为 SELECTED、NO_MATCH 或 UNKNOWN。证据明确表明所有条件都不成立时返回 NO_MATCH；地点或日期不匹配、证据不足、条件无法确定时返回 UNKNOWN。后两者 selectedChoiceId 为空，candidates 为空数组。
                 只生成选中目标所需的意图；不得生成未选分支。新增意图的 dependsOn 必须包含前置意图 ID。
                 相对日期按时间锚点解释，description 和 expectedResult 使用明确日期。
                 只能选用意图目录中的 code。只返回 JSON：
-                {"selectedChoiceId":"选择 ID 或空字符串","reason":"依据或无法判断原因","candidates":[{"id":"唯一 ID","code":"意图编码","description":"目标","progressText":"进度","expectedResult":"可验证结果","confidence":1.0,"priority":0,"complexity":"SIMPLE|COMPLEX","dependsOn":["前置意图 ID"]}]}
+                {"outcome":"SELECTED|NO_MATCH|UNKNOWN","selectedChoiceId":"选择 ID 或空字符串","reason":"依据或无法判断原因","candidates":[{"id":"唯一 ID","code":"意图编码","description":"目标","progressText":"进度","expectedResult":"可验证结果","confidence":1.0,"priority":0,"complexity":"SIMPLE|COMPLEX","dependsOn":["前置意图 ID"]}]}
                 意图目录：%s
                 待决分支：%s
                 前置真实结果：%s

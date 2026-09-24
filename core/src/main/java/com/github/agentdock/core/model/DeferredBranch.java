@@ -10,6 +10,7 @@ public final class DeferredBranch {
     private String triggerIntentId;
     private List<Choice> choices = List.of();
     private String selectedChoiceId;
+    private List<String> addedNodeIds = List.of();
     private String resolution;
     private String resolutionReason;
 
