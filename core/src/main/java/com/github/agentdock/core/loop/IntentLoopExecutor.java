@@ -10,14 +10,12 @@ import com.github.agentdock.core.type.AiEventType;
 import com.github.agentdock.core.type.IntentStatus;
 import com.github.agentdock.core.task.*;
 import com.github.agentdock.core.context.*;
-import com.github.agentdock.core.internal.ExecutorSupport;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
-import java.util.concurrent.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,20 +29,12 @@ public final class IntentLoopExecutor {
     public static final int MAX_TOOL_CALLS = 12;
     public static final Duration MAX_INTENT_DURATION = Duration.ofMinutes(2);
     public static final Duration MAX_PLANNER_DURATION = Duration.ofSeconds(45);
-    private static final int CPU_COUNT = Math.max(1, Runtime.getRuntime().availableProcessors());
-    private static final int PLANNER_PARALLELISM = Math.max(1, CPU_COUNT / 4);
-    private static final ExecutorService PLANNER_EXECUTOR = new ThreadPoolExecutor(
-            PLANNER_PARALLELISM, PLANNER_PARALLELISM, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(Math.max(8, PLANNER_PARALLELISM * 4)),
-            ExecutorSupport.daemonThreadFactory("ai-intent-planner"),
-            new ThreadPoolExecutor.AbortPolicy());
-
     public void shutdown() {
-        PLANNER_EXECUTOR.shutdownNow();
+        PlannerCallRunner.shutdown();
     }
 
     public static void shutdownExecutor() {
-        PLANNER_EXECUTOR.shutdownNow();
+        PlannerCallRunner.shutdown();
     }
 
     private final IntentLoopPlanner planner;
@@ -139,28 +129,11 @@ public final class IntentLoopExecutor {
                 payload("taskId", task.getId(), "objective", task.getObjective(),
                         "successCriteria", task.getSuccessCriteria()));
         long start = System.nanoTime();
-        int[] counts = new int[3];
+        ExecutionMetrics metrics = new ExecutionMetrics();
         try {
-            IntentResult result = executeInternal(intent, task, context, counts);
-            publish(context, intent, AiEventType.VERIFICATION_STARTED, "正在验收任务结果", 76,
-                    payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria()));
-            TaskVerification verification = taskVerifier.verify(task, result, context);
-            context.addVerification(intent.getId(), verification);
-            if (!verification.isPassed() && verification.isReplanRequired()) {
-                java.util.Optional<Task> replanned = taskReplanner.replan(task, verification, context);
-                if (replanned.isPresent()) {
-                    publish(context, intent, AiEventType.TASK_REPLANNED, "任务未满足成功标准，正在重新规划", 76,
-                            java.util.Map.of("taskId", task.getId(), "replannedTaskId", replanned.get().getId(),
-                                    "reason", verification.getMessage() == null ? "结果未通过检查" : verification.getMessage()));
-                    IntentResult retryResult = executeInternal(intent, replanned.get(), context, counts);
-                    TaskVerification retryVerification = taskVerifier.verify(replanned.get(), retryResult, context);
-                    context.addVerification(intent.getId(), retryVerification);
-                    if (retryVerification.isPassed()) {
-                        result = retryResult;
-                        verification = retryVerification;
-                    }
-                }
-            }
+            VerifiedAttempt outcome = executeAndVerify(intent, task, context, metrics);
+            IntentResult result = outcome.attempt().result();
+            TaskVerification verification = outcome.verification();
             task.setStatus(verification.isPassed() ? TaskStatus.SUCCESS :
                     verification.isReplanRequired() ? TaskStatus.NEEDS_REPLAN : TaskStatus.FAILED);
             publish(context, intent, AiEventType.TASK_VERIFIED,
@@ -173,6 +146,7 @@ public final class IntentLoopExecutor {
                     payload("taskId", task.getId(), "action", verification.getAction(),
                             "evidence", verification.getEvidence()));
             if (verification.isPassed()) return result;
+            if (outcome.attempt().planningFailed()) return result;
             String message = verification.getMessage() == null || verification.getMessage().isBlank()
                     ? "任务结果未通过验收" : verification.getMessage();
             if (verification.getAction() == VerificationAction.WAITING_USER
@@ -183,43 +157,135 @@ public final class IntentLoopExecutor {
             return IntentResult.failed(intent, message);
         } finally {
             publish(context, intent, AiEventType.INTENT_METRICS,
-                    "任务执行完成：规划 " + counts[0] + " 次，调用工具 " + counts[1] + " 次", 80,
-                    java.util.Map.of("plannerCalls", counts[0], "toolCalls", counts[1],
-                            "confirmationOnly", counts[2] == 1, "hasSecondRound", counts[0] > 1,
+                    "任务执行完成：规划 " + metrics.plannerCalls + " 次，调用工具 " + metrics.toolCalls + " 次", 80,
+                    java.util.Map.of("plannerCalls", metrics.plannerCalls, "toolCalls", metrics.toolCalls,
+                            "confirmationOnly", metrics.confirmationOnly, "hasSecondRound", metrics.plannerCalls > 1,
                             "elapsedMillis", (System.nanoTime() - start) / 1_000_000));
         }
     }
 
-    private IntentResult executeInternal(IntentCandidate intent, Task task, AiExecutionContext context, int[] counts) {
+    private record ExecutionAttempt(IntentResult result, boolean planningFailed) { }
+
+    /** 一次意图执行共用的观测指标；补救执行计入同一统计。 */
+    private static final class ExecutionMetrics {
+        private int plannerCalls;
+        private int toolCalls;
+        private boolean confirmationOnly;
+    }
+
+    private record VerifiedAttempt(ExecutionAttempt attempt, TaskVerification verification) { }
+
+    /** 规划故障不可由宿主验收覆盖；普通验收失败仍允许一次补救任务。 */
+    private VerifiedAttempt executeAndVerify(IntentCandidate intent, Task task, AiExecutionContext context,
+                                             ExecutionMetrics metrics) {
+        ExecutionAttempt attempt = executeAttempt(intent, task, context, metrics);
+        publish(context, intent, AiEventType.VERIFICATION_STARTED, "正在验收任务结果", 76,
+                payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria()));
+        TaskVerification verification = verifyAttempt(intent, task, context, attempt);
+        VerifiedAttempt original = new VerifiedAttempt(attempt, verification);
+        if (verification.isPassed() || !verification.isReplanRequired()) return original;
+
+        java.util.Optional<Task> replanned = taskReplanner.replan(task, verification, context);
+        if (replanned.isEmpty()) return original;
+        Task retryTask = replanned.get();
+        publish(context, intent, AiEventType.TASK_REPLANNED, "任务未满足成功标准，正在重新规划", 76,
+                Map.of("taskId", task.getId(), "replannedTaskId", retryTask.getId(),
+                        "reason", verification.getMessage() == null ? "结果未通过检查" : verification.getMessage()));
+        ExecutionAttempt retry = executeAttempt(intent, retryTask, context, metrics);
+        TaskVerification retryVerification = verifyAttempt(intent, retryTask, context, retry);
+        if (retry.planningFailed()) {
+            preserveCompletedOutputs(intent, attempt.result(), retry.result());
+            return new VerifiedAttempt(retry, retryVerification);
+        }
+        return retryVerification.isPassed() ? new VerifiedAttempt(retry, retryVerification) : original;
+    }
+
+    private TaskVerification verifyAttempt(IntentCandidate intent, Task task, AiExecutionContext context,
+                                           ExecutionAttempt attempt) {
+        TaskVerification verification = attempt.planningFailed()
+                ? TaskVerification.failed(attempt.result().getMessage(), false)
+                : taskVerifier.verify(task, attempt.result(), context);
+        context.addVerification(intent.getId(), verification);
+        return verification;
+    }
+
+    private void preserveCompletedOutputs(IntentCandidate intent, IntentResult original, IntentResult retry) {
+        if (original.getOutput() == null) return;
+        List<Object> completedOutputs = new ArrayList<>();
+        completedOutputs.add(original.getOutput());
+        if (retry.getOutput() != null) completedOutputs.add(retry.getOutput());
+        retry.setOutput(outputCombiner.combine(intent, completedOutputs));
+    }
+
+    /** 规划异常不代表目标已完成，也不能通过重放任务恢复已有副作用。 */
+    private ExecutionAttempt executeAttempt(IntentCandidate intent, Task task, AiExecutionContext context, ExecutionMetrics metrics) {
+        try {
+            return new ExecutionAttempt(executeInternal(intent, task, context, metrics), false);
+        } catch (PlanningFailure failure) {
+            return new ExecutionAttempt(failure.result, true);
+        }
+    }
+
+    private static final class PlanningFailure extends RuntimeException {
+        private final IntentResult result;
+        private PlanningFailure(IntentResult result, RuntimeException cause) {
+            super(result.getMessage(), cause);
+            this.result = result;
+        }
+    }
+
+    private PlanningFailure planningFailure(IntentCandidate intent, List<AgentObservation> observations,
+                                            RuntimeException exception) {
+        List<Object> outputs = observations.stream()
+                .map(AgentObservation::getResult).filter(java.util.Objects::nonNull)
+                .filter(CapabilityResult::isSuccess).map(CapabilityResult::getOutput)
+                .filter(java.util.Objects::nonNull).toList();
+        Throwable cause = exception;
+        for (int depth = 0; depth < 8 && cause.getCause() != null && cause.getCause() != cause; depth++)
+            cause = cause.getCause();
+        String detail = displayText(cause.getMessage(), exception.getMessage());
+        String message = "规划异常，任务尚未确认完成：" + displayText(detail, "未返回异常说明");
+        Object output = outputs.isEmpty() ? null : outputCombiner.combine(intent, outputs);
+        return new PlanningFailure(new IntentResult(intent.getId(), intent.getCode(), IntentStatus.FAILED,
+                output, message), exception);
+    }
+
+    /** 已绑定调用直接执行，不进入模型规划循环。 */
+    private IntentResult executeBoundInvocation(IntentCandidate intent, Task task, AiExecutionContext context,
+                                                ExecutionMetrics metrics) {
+        CapabilityInvocation invocation = task.getCapabilityInvocation();
+        CapabilityDefinition definition = capabilities.definition(invocation.getCapabilityCode());
+        if (definition == null) return IntentResult.failed(intent, "兜底能力未注册：" + invocation.getCapabilityCode());
+        String requestedCapabilityCode = invocation.getCapabilityCode();
+        boolean visible = capabilityResolver.resolve(intent, context, capabilities).stream()
+                .anyMatch(candidate -> requestedCapabilityCode.equals(candidate.getCode()));
+        if (!visible) return IntentResult.failed(intent, "当前上下文不允许调用能力：" + invocation.getCapabilityCode());
+        try {
+            invocation = invocationBinder.bind(intent, context, invocation, definition);
+            task.setCapabilityInvocation(invocation);
+        } catch (IllegalArgumentException exception) {
+            return IntentResult.failed(intent, exception.getMessage());
+        }
+        publishToolCalling(context, intent, invocation, definition);
+        CapabilityCallResult call = capabilityInvoker.invoke(intent, context, invocation, MAX_FAILURE_RECOVERY);
+        metrics.toolCalls++;
+        log.info("AI 工具调用完成 executionId={}, intentId={}, capability={}, success={}, recoveries={}",
+                context.getConversation().getExecutionId(), intent.getId(), invocation.getCapabilityCode(),
+                call.result().isSuccess(), call.recoveryAttempts());
+        publish(context, intent, AiEventType.TOOL_RESULT,
+                toolResultMessage(definition, call.result()), 65,
+                payload("requestedCapabilityCode", invocation.getCapabilityCode(),
+                        "capabilityCode", call.actualCapabilityCode(), "capabilityDescription", definition.getDescription(),
+                        "arguments", invocation.getArguments(), "result", call.result(), "recoveryAttempts", call.recoveryAttempts(),
+                        "compensationAttempted", call.compensationAttempted(), "elapsedMillis", call.elapsedMillis()));
+        if (call.result().isSuccess()) return IntentResult.success(intent, call.result().getOutput());
+        return IntentResult.failed(intent, call.result().getMessage());
+    }
+
+    private IntentResult executeInternal(IntentCandidate intent, Task task, AiExecutionContext context, ExecutionMetrics metrics) {
         log.info("AI 意图 Loop 开始 executionId={}, intentId={}, code={}", context.getConversation().getExecutionId(), intent.getId(), intent.getCode());
         if (task.getCapabilityInvocation() != null) {
-            CapabilityInvocation invocation = task.getCapabilityInvocation();
-            CapabilityDefinition definition = capabilities.definition(invocation.getCapabilityCode());
-            if (definition == null) return IntentResult.failed(intent, "兜底能力未注册：" + invocation.getCapabilityCode());
-            String requestedCapabilityCode = invocation.getCapabilityCode();
-            boolean visible = capabilityResolver.resolve(intent, context, capabilities).stream()
-                    .anyMatch(candidate -> requestedCapabilityCode.equals(candidate.getCode()));
-            if (!visible) return IntentResult.failed(intent, "当前上下文不允许调用能力：" + invocation.getCapabilityCode());
-            try {
-                invocation = invocationBinder.bind(intent, context, invocation, definition);
-                task.setCapabilityInvocation(invocation);
-            } catch (IllegalArgumentException exception) {
-                return IntentResult.failed(intent, exception.getMessage());
-            }
-            publishToolCalling(context, intent, invocation, definition);
-            CapabilityCallResult call = capabilityInvoker.invoke(intent, context, invocation, MAX_FAILURE_RECOVERY);
-            counts[1]++;
-            log.info("AI 工具调用完成 executionId={}, intentId={}, capability={}, success={}, recoveries={}",
-                    context.getConversation().getExecutionId(), intent.getId(), invocation.getCapabilityCode(),
-                    call.result().isSuccess(), call.recoveryAttempts());
-            publish(context, intent, AiEventType.TOOL_RESULT,
-                    toolResultMessage(definition, call.result()), 65,
-                    payload("requestedCapabilityCode", invocation.getCapabilityCode(),
-                            "capabilityCode", call.actualCapabilityCode(), "capabilityDescription", definition.getDescription(),
-                            "arguments", invocation.getArguments(), "result", call.result(), "recoveryAttempts", call.recoveryAttempts(),
-                            "compensationAttempted", call.compensationAttempted(), "elapsedMillis", call.elapsedMillis()));
-            if (call.result().isSuccess()) return IntentResult.success(intent, call.result().getOutput());
-            return IntentResult.failed(intent, call.result().getMessage());
+            return executeBoundInvocation(intent, task, context, metrics);
         }
         if (planner == null) return IntentResult.failed(intent, "未注册意图 Loop 规划器");
         Instant deadline = Instant.now().plus(MAX_INTENT_DURATION);
@@ -266,30 +332,14 @@ public final class IntentLoopExecutor {
             publishContext(context, intent, planningContext);
             IntentLoopDecision decision;
             try {
-                counts[0]++;
+                metrics.plannerCalls++;
                 decision = decide(request, deadline);
             } catch (RuntimeException exception) {
-                List<Object> successfulOutputs = observations.stream()
-                        .map(AgentObservation::getResult).filter(CapabilityResult::isSuccess)
-                        .map(CapabilityResult::getOutput).filter(java.util.Objects::nonNull).toList();
-                if (!successfulOutputs.isEmpty())
-                    return IntentResult.success(intent, outputCombiner.combine(intent, successfulOutputs));
-                return IntentResult.failed(intent, exception.getMessage());
+                throw planningFailure(intent, observations, exception);
             }
             if (decision == null) return IntentResult.failed(intent, "Loop 规划器未返回决策");
             if (decision.getStatus() == null) return IntentResult.failed(intent, "Loop 规划器未返回有效状态");
-            if (decision.getToolInvocations() != null) {
-                List<CapabilityInvocation> validInvocations = new ArrayList<>();
-                for (CapabilityInvocation invocation : decision.getToolInvocations()) {
-                    if (invocation == null || invocation.getCapabilityCode() == null
-                            || invocation.getCapabilityCode().isBlank()) continue;
-                    if (invocation.getDependsOnInvocationIds() != null && !intent.getDependsOn().isEmpty())
-                        invocation.setDependsOnInvocationIds(invocation.getDependsOnInvocationIds().stream()
-                                .filter(id -> !intent.getDependsOn().contains(id)).toList());
-                    validInvocations.add(invocation);
-                }
-                decision.setToolInvocations(validInvocations);
-            }
+            normalizeInvocations(intent, decision);
             log.info("AI 规划结果 executionId={}, intentId={}, iteration={}, status={}, toolCount={}",
                     context.getConversation().getExecutionId(), intent.getId(), iteration + 1, decision.getStatus(),
                     decision.getToolInvocations() == null ? 0 : decision.getToolInvocations().size());
@@ -306,7 +356,7 @@ public final class IntentLoopExecutor {
                 if (!observations.isEmpty() && !observations.get(observations.size() - 1).getResult().isSuccess()) {
                     return IntentResult.failed(intent, "最近一次工具调用失败，不能直接声明完成");
                 }
-                if (iteration > 0) counts[2] = 1;
+                if (iteration > 0) metrics.confirmationOnly = true;
                 if (!observations.isEmpty()) {
                     List<Object> successfulOutputs = observations.stream()
                             .map(AgentObservation::getResult)
@@ -335,7 +385,7 @@ public final class IntentLoopExecutor {
             boolean allTerminal = true;
             boolean allSuccessful = true;
             java.util.List<Object> outputs = new java.util.ArrayList<>();
-            for (CapabilityInvocation invocation : orderInvocations(decision.getToolInvocations())) {
+            for (CapabilityInvocation invocation : CapabilityInvocationOrder.order(decision.getToolInvocations())) {
                 if (!allSuccessful) break;
                 if (++toolCalls > MAX_TOOL_CALLS) return IntentResult.failed(intent, "意图已达到最大工具调用次数");
                 if (invocation == null || invocation.getCapabilityCode() == null
@@ -359,7 +409,7 @@ public final class IntentLoopExecutor {
                 boolean duplicate = observations.stream().anyMatch(observation ->
                         boundCapabilityCode.equals(observation.getToolCode())
                                 && java.util.Objects.equals(boundArguments, observation.getArguments()));
-                if (duplicate) return finalizeObservations(intent, context, history, observations, counts,
+                if (duplicate) return finalizeObservations(intent, context, history, observations, metrics,
                         "检测到重复能力调用，停止继续探索");
                 if (invocation.getInputRefs() != null && !invocation.getInputRefs().isEmpty()) {
                     publish(context, intent, AiEventType.INPUT_BOUND, "已绑定前置意图结果", 50,
@@ -369,7 +419,7 @@ public final class IntentLoopExecutor {
                 publishToolCalling(context, intent, invocation, definition);
                 CapabilityCallResult call = capabilityInvoker.invoke(intent, context, invocation,
                         MAX_FAILURE_RECOVERY - recoveryAttempts);
-                counts[1]++;
+                metrics.toolCalls++;
                 CapabilityResult result = call.result();
                 log.info("AI 工具调用完成 executionId={}, intentId={}, capability={}, success={}, recoveries={}",
                         context.getConversation().getExecutionId(), intent.getId(), invocation.getCapabilityCode(),
@@ -408,44 +458,29 @@ public final class IntentLoopExecutor {
                 return IntentResult.success(intent, outputCombiner.combine(intent, outputs));
             }
         }
-        return finalizeObservations(intent, context, history, observations, counts,
+        return finalizeObservations(intent, context, history, observations, metrics,
                 Instant.now().isAfter(deadline) ? "已达到意图执行时间边界" : "已达到最大规划轮次");
     }
 
-    /** 对同一意图内的工具调用按显式 invocationId 依赖排序，保持无依赖调用的原始顺序。 */
-    private List<CapabilityInvocation> orderInvocations(List<CapabilityInvocation> invocations) {
-        if (invocations == null || invocations.size() < 2) return invocations == null ? List.of() : invocations;
-        java.util.Map<String, CapabilityInvocation> byId = new java.util.LinkedHashMap<>();
-        for (CapabilityInvocation invocation : invocations) {
-            if (invocation != null && invocation.getInvocationId() != null && !invocation.getInvocationId().isBlank()) {
-                if (byId.put(invocation.getInvocationId(), invocation) != null) throw new IllegalArgumentException("工具调用 ID 重复");
+    /** 去除无效调用，并将意图依赖与工具调用依赖分开。 */
+    private void normalizeInvocations(IntentCandidate intent, IntentLoopDecision decision) {
+        if (decision.getToolInvocations() == null) return;
+        List<CapabilityInvocation> validInvocations = new ArrayList<>();
+        for (CapabilityInvocation invocation : decision.getToolInvocations()) {
+            if (invocation == null || invocation.getCapabilityCode() == null
+                    || invocation.getCapabilityCode().isBlank()) continue;
+            if (invocation.getDependsOnInvocationIds() != null && !intent.getDependsOn().isEmpty()) {
+                invocation.setDependsOnInvocationIds(invocation.getDependsOnInvocationIds().stream()
+                        .filter(id -> !intent.getDependsOn().contains(id)).toList());
             }
+            validInvocations.add(invocation);
         }
-        if (byId.isEmpty()) return invocations;
-        List<CapabilityInvocation> result = new java.util.ArrayList<>();
-        java.util.Set<String> visiting = new java.util.HashSet<>();
-        java.util.Set<String> visited = new java.util.HashSet<>();
-        for (CapabilityInvocation invocation : invocations) visitInvocation(invocation, byId, visiting, visited, result);
-        return result;
-    }
-
-    private void visitInvocation(CapabilityInvocation invocation, java.util.Map<String, CapabilityInvocation> byId,
-                                 java.util.Set<String> visiting, java.util.Set<String> visited,
-                                 List<CapabilityInvocation> result) {
-        String id = invocation == null ? null : invocation.getInvocationId();
-        if (id == null || id.isBlank() || visited.contains(id)) { if (id == null || id.isBlank()) result.add(invocation); return; }
-        if (!visiting.add(id)) throw new IllegalArgumentException("工具调用依赖存在环: " + id);
-        for (String dependency : invocation.getDependsOnInvocationIds() == null ? List.<String>of() : invocation.getDependsOnInvocationIds()) {
-            CapabilityInvocation parent = byId.get(dependency);
-            if (parent == null) throw new IllegalArgumentException("工具调用依赖不存在: " + dependency);
-            visitInvocation(parent, byId, visiting, visited, result);
-        }
-        visiting.remove(id); visited.add(id); result.add(invocation);
+        decision.setToolInvocations(validInvocations);
     }
 
     private IntentResult finalizeObservations(IntentCandidate intent, AiExecutionContext context,
                                               List<ConversationMessage> history,
-                                              List<AgentObservation> observations, int[] counts, String reason) {
+                                              List<AgentObservation> observations, ExecutionMetrics metrics, String reason) {
         List<AgentObservation> successful = observations.stream()
                 .filter(item -> item.getResult() != null && item.getResult().isSuccess()).toList();
         if (successful.isEmpty()) return IntentResult.failed(intent, reason + "，且没有可用于归纳的成功结果");
@@ -469,7 +504,7 @@ public final class IntentLoopExecutor {
         request.setContextSnapshot(summaryContext);
         publishContext(context, intent, summaryContext);
         try {
-            counts[0]++;
+            metrics.plannerCalls++;
             IntentLoopDecision decision = decide(request, Instant.now().plusSeconds(30));
             publish(context, intent, AiEventType.AGENT_DECISION, decisionMessage(decision), 75,
                     java.util.Map.of("iteration", MAX_ITERATIONS + 1, "finalizing", true, "decision", decision));
@@ -482,9 +517,7 @@ public final class IntentLoopExecutor {
                     ? decision.getReason() : reason + "，已有结果不足以满足任务目标";
             return IntentResult.failed(intent, message);
         } catch (RuntimeException exception) {
-            return IntentResult.success(intent, outputCombiner.combine(intent, successful.stream()
-                    .map(AgentObservation::getResult).map(CapabilityResult::getOutput)
-                    .filter(java.util.Objects::nonNull).toList()));
+            throw planningFailure(intent, successful, exception);
         }
     }
 
@@ -567,22 +600,7 @@ public final class IntentLoopExecutor {
     }
 
     private IntentLoopDecision decide(IntentLoopRequest request, Instant deadline) {
-        long remainingMillis = Duration.between(Instant.now(), deadline).toMillis();
-        if (remainingMillis <= 0) return null;
-        long timeoutMillis = Math.min(remainingMillis, MAX_PLANNER_DURATION.toMillis());
-        Future<IntentLoopDecision> future = PLANNER_EXECUTOR.submit(() -> planner.decide(request));
-        try {
-            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException exception) {
-            future.cancel(true);
-            throw new IllegalStateException("意图 Loop 规划调用超时", exception);
-        } catch (InterruptedException exception) {
-            future.cancel(true);
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("意图 Loop 规划调用被中断", exception);
-        } catch (ExecutionException exception) {
-            throw new IllegalStateException("意图 Loop 规划调用失败", exception.getCause());
-        }
+        return PlannerCallRunner.decide(planner, request, deadline, MAX_PLANNER_DURATION);
     }
 
     private List<ConversationMessage> loadHistory(IntentCandidate intent, AiExecutionContext context) {
