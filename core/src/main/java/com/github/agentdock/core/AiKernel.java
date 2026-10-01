@@ -66,6 +66,13 @@ public final class AiKernel {
     private TaskReplanner taskReplanner = new NoopTaskReplanner();
     private PlanReplanner planReplanner = new NoopPlanReplanner();
     private AiExecutionMode executionMode = AiExecutionMode.SERIAL;
+    private boolean executionObservationEnabled;
+
+    /** 默认关闭，避免改变已有宿主的事件序列。 */
+    public AiKernel registerExecutionObservation(boolean enabled) {
+        this.executionObservationEnabled = enabled;
+        return this;
+    }
     private SteeringPlanMode steeringPlanMode = "LEGACY_REPLACE_PENDING".equalsIgnoreCase(
             System.getProperty("agentdock.steering.plan-mode"))
             ? SteeringPlanMode.LEGACY_REPLACE_PENDING : SteeringPlanMode.CONSERVATIVE;
@@ -252,6 +259,7 @@ public final class AiKernel {
                         capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner),
                 chatHistoryStore, executionMode, planReplanner, effectiveAssembler, steeringPlanMode,
                 executionCheckpointStore)
+                .withExecutionObservation(executionObservationEnabled)
                 .execute(context, steering == null ? ExecutionSteering.disabled() : steering);
     }
 

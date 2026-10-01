@@ -30,6 +30,13 @@ import org.slf4j.LoggerFactory;
 
 /** AI 核心 DAG 编排器，不依赖任何具体业务 Service 或 DAO。 */
 public class AiExecutionEngine {
+    private boolean executionObservationEnabled;
+    private Map<String, Object> lastObservationSnapshot;
+
+    public AiExecutionEngine withExecutionObservation(boolean enabled) {
+        this.executionObservationEnabled = enabled;
+        return this;
+    }
     private static final Logger log = LoggerFactory.getLogger(AiExecutionEngine.class);
     /** 意图分析默认携带的最近上下文条数，避免省略表达失去语境。 */
     private static final int ANALYSIS_HISTORY_LIMIT = 6;
@@ -117,6 +124,7 @@ public class AiExecutionEngine {
 
     /** 按计划执行，并在批次边界消费宿主投递的补充输入。 */
     public ConversationResult execute(ConversationContext conversation, ExecutionSteering steering) {
+        lastObservationSnapshot = null;
         if (conversation == null) throw new IllegalArgumentException("会话上下文不能为空");
         steering = steering == null ? ExecutionSteering.disabled() : steering;
         if (conversation.getExecutionId() == null || conversation.getExecutionId().isBlank()) {
@@ -706,6 +714,7 @@ public class AiExecutionEngine {
 
     private void saveCheckpoint(ConversationContext conversation, ExecutionPlan plan,
                                 List<IntentResult> results, ConversationResult finalResult) {
+        publishPlanSnapshot(conversation, plan);
         if (executionCheckpointStore == null || conversation.getConversationId() == null
                 || conversation.getConversationId().isBlank()) return;
         ExecutionSnapshot snapshot = new ExecutionSnapshot();
@@ -717,6 +726,29 @@ public class AiExecutionEngine {
                     checkpointMapper.writeValueAsString(snapshot));
         } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
             throw new IllegalStateException("执行检查点无法序列化", exception);
+        }
+    }
+
+    /** 只输出通用计划信息；观测失败不能干扰业务执行或检查点写入。 */
+    private void publishPlanSnapshot(ConversationContext conversation, ExecutionPlan plan) {
+        if (!executionObservationEnabled) return;
+        try {
+            List<Map<String, Object>> nodes = plan.getNodes().values().stream().map(node -> {
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("id", node.getId());
+                value.put("description", node.getIntent().getDescription());
+                value.put("dependsOn", List.copyOf(node.getIntent().getDependsOn()));
+                value.put("status", node.getStatus().name());
+                value.put("replacesNodeId", node.getReplacesNodeId());
+                return value;
+            }).toList();
+            Map<String, Object> payload = Map.of("planId", plan.getId(), "planVersion", plan.getVersion(),
+                    "executionMode", executionMode.name(), "nodes", nodes);
+            if (payload.equals(lastObservationSnapshot)) return;
+            publish(conversation, null, AiEventType.PLAN_SNAPSHOT, "执行计划状态", 15, payload);
+            lastObservationSnapshot = payload;
+        } catch (RuntimeException exception) {
+            log.warn("执行计划观测失败 executionId={}", conversation.getExecutionId(), exception);
         }
     }
 

@@ -54,4 +54,5 @@ public enum AiEventType {
     ,STEERING_ANALYZING
     ,STEERING_APPLIED
     ,STEERING_REJECTED
+    ,PLAN_SNAPSHOT
 }

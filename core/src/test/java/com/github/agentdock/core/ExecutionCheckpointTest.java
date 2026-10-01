@@ -21,7 +21,7 @@ class ExecutionCheckpointTest {
         AtomicInteger firstCalls = new AtomicInteger();
         AtomicInteger secondCalls = new AtomicInteger();
         InterruptOnceStore store = new InterruptOnceStore();
-        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store)
+        AiKernel kernel = new AiKernel().registerExecutionObservation(true).registerExecutionCheckpointStore(store)
                 .registerIntent(new IntentDefinition("ACTION", "执行动作"))
                 .registerIntentAnalyzer((LlmIntentAnalyzer) (conversation, catalog) -> {
                     analyzed.incrementAndGet();
@@ -54,7 +54,7 @@ class ExecutionCheckpointTest {
         ExecutionSnapshot snapshot = new ExecutionSnapshot();
         snapshot.setPlan(plan);
         store.value = new ObjectMapper().writeValueAsString(snapshot);
-        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store)
+        AiKernel kernel = new AiKernel().registerExecutionObservation(true).registerExecutionCheckpointStore(store)
                 .registerCapability(capability("first", calls));
 
         ConversationResult result = kernel.execute(new ConversationContext("session", "run", "user",

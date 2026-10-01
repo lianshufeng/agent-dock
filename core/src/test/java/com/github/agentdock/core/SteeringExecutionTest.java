@@ -170,6 +170,7 @@ class SteeringExecutionTest {
     private AiKernel kernel(SteeringAction action, List<String> targets, List<IntentCandidate> extra,
                             List<String> executed, List<String> seenInputs, String question) {
         return new AiKernel()
+                .registerExecutionObservation(true)
                 .registerIntent(new IntentDefinition("TASK", "执行一项任务"))
                 .registerIntentAnalyzer(new LlmIntentAnalyzer() {
                     @Override public IntentAdapterResult analyze(ConversationContext context, String catalog) {
