@@ -13,6 +13,44 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RegisteredTaskExecutionTest {
+    @Test void confirmationRequiredCannotBeBypassedByClientAttributesOrVerifier() {
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = confirmedKernel(calls)
+                .registerTaskVerifier((task, result, context) -> TaskVerification.passed());
+        ConversationContext conversation = input();
+        conversation.setAttributes(Map.of("confirmed", true, "confirmationRequired", false));
+        assertEquals(IntentStatus.WAITING_USER, kernel.execute(conversation).getStatus());
+        assertEquals(0, calls.get());
+    }
+
+    @Test void trustedConfirmationPolicyAllowsTheSameRegisteredTask() {
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = confirmedKernel(calls).registerTaskConfirmationPolicy((task, context) -> {
+            assertEquals("confirmed.write", task.getDefinitionCode());
+            assertTrue(task.isConfirmationRequired());
+            assertEquals("user", context.getConversation().getUserId());
+            return true;
+        });
+        assertEquals(IntentStatus.SUCCESS, kernel.execute(input()).getStatus());
+        assertEquals(1, calls.get());
+    }
+
+    private AiKernel confirmedKernel(AtomicInteger calls) {
+        TaskDefinition definition = new TaskDefinition("confirmed.write", "确认后写入", Set.of("TEST"),
+                List.of("write"), "真实写入成功");
+        definition.setConfirmationRequired(true);
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.DIRECT);
+        definition.setSteps(List.of(new CapabilityInvocation("write", Map.of())));
+        return kernel().registerTask(definition).registerCapability(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("write", "写入", Map.of(), Map.of(), true, false, false, null, 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                calls.incrementAndGet(); return CapabilityResult.success(Map.of("id", "real-id"));
+            }
+        });
+    }
+
     @Test void unknownToolOutcomeStopsLoopAndDependentIntent() {
         AtomicInteger calls = new AtomicInteger();
         AiKernel kernel = kernel().registerCapability(new AiCapability() {

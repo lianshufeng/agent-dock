@@ -135,7 +135,8 @@ public final class IntentLoopExecutor {
             VerifiedAttempt outcome = executeAndVerify(intent, task, context, metrics);
             IntentResult result = outcome.attempt().result();
             TaskVerification verification = outcome.verification();
-            task.setStatus(verification.isPassed() ? TaskStatus.SUCCESS :
+            task.setStatus(result.getStatus() == IntentStatus.WAITING_USER ? TaskStatus.WAITING_USER :
+                    verification.isPassed() ? TaskStatus.SUCCESS :
                     verification.isReplanRequired() ? TaskStatus.NEEDS_REPLAN : TaskStatus.FAILED);
             publish(context, intent, AiEventType.TASK_VERIFIED,
                     verification.isPassed() ? "结果已满足任务完成标准：" + displayText(task.getSuccessCriteria(), "已得到有效结果")
@@ -166,6 +167,13 @@ public final class IntentLoopExecutor {
     }
 
     private record ExecutionAttempt(IntentResult result, boolean planningFailed) { }
+
+    private com.github.agentdock.core.task.TaskConfirmationPolicy taskConfirmationPolicy = (task, context) -> false;
+
+    public IntentLoopExecutor withTaskConfirmationPolicy(com.github.agentdock.core.task.TaskConfirmationPolicy policy) {
+        this.taskConfirmationPolicy = java.util.Objects.requireNonNull(policy, "任务确认策略不能为空");
+        return this;
+    }
 
     /** 一次意图执行共用的观测指标；补救执行计入同一统计。 */
     private static final class ExecutionMetrics {
@@ -326,6 +334,12 @@ public final class IntentLoopExecutor {
 
     private IntentResult executeInternal(IntentCandidate intent, Task task, AiExecutionContext context, ExecutionMetrics metrics) {
         log.info("AI 意图 Loop 开始 executionId={}, intentId={}, code={}", context.getConversation().getExecutionId(), intent.getId(), intent.getCode());
+        if (task.isConfirmationRequired() && !taskConfirmationPolicy.isConfirmed(task, context)) {
+            String message = "当前任务需要用户确认后才能执行";
+            publish(context, intent, AiEventType.WAITING_USER, message, 24,
+                    payload("taskId", task.getId(), "definitionCode", task.getDefinitionCode()));
+            return IntentResult.waitingUser(intent, message);
+        }
         if (!task.getSteps().isEmpty()) {
             return executeWorkflow(intent, task, context, metrics);
         }

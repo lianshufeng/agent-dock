@@ -11,6 +11,8 @@ public class Task {
     private String intentId;
     /** 命中的注册任务编码；为空时保留旧宿主的执行规则。 */
     private String definitionCode;
+    /** 由注册任务定义复制，宿主须核实确认后才允许执行工具。 */
+    private boolean confirmationRequired;
     /** 已注册任务的能力白名单；只在 definitionCode 非空时生效。 */
     private List<String> allowedCapabilityCodes = List.of();
     /** 编译后的固定流程；为空时保留原动态规划路径。 */

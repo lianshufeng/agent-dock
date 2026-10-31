@@ -107,7 +107,8 @@ flowchart TD
 
 - 意图与能力分离：`IntentDefinition` 只描述用户目标；`CapabilityDefinition` 独立描述输入、输出、副作用、超时、重试、补偿和替代能力。
 - 任务作为可注册的业务语义：宿主可通过 `TaskDefinition` 和 `TaskRegistry` 声明任务适用的意图、能力范围、执行模式和完成标准；未注册任务的旧宿主继续使用默认任务规划器。
-- 固定任务可在 `steps` 中声明工具调用，使用 `DIRECT`（单步骤）或 `WORKFLOW` 模式。内核先检查整组依赖和能力边界，再串行执行、绑定真实输出并统一验收；任一步失败停止后续步骤。`inputRefs.intentId=$task` 仅引用排序后上一步的输出，不表示任意步骤结果查询。执行模式、确认和风险字段没有配置实际步骤或宿主策略时，不会自动产生审批或流程行为。
+- 固定任务可在 `steps` 中声明工具调用，使用 `DIRECT`（单步骤）或 `WORKFLOW` 模式。内核先检查整组依赖和能力边界，再串行执行、绑定真实输出并统一验收；任一步失败停止后续步骤。`inputRefs.intentId=$task` 仅引用排序后上一步的输出，不表示任意步骤结果查询。执行模式和风险字段没有配置实际步骤或宿主策略时，不会自动产生流程行为。
+- 任务确认：注册任务的 `confirmationRequired=true` 时，默认以 `WAITING_USER` 停止且不调用工具；宿主通过 `registerTaskConfirmationPolicy` 注入服务端核验逻辑后才能放行，客户端 `attributes.confirmed` 不会自动生效。策略须核实用户、会话、作用域及操作内容。当前尚无通用确认令牌、确认界面或持久审批恢复协议；旧业务工具内的确认与权限校验继续保留。
 - 全局一次意图识别：`IntentFactory` 将注册的意图目录汇总后发起一次结构化分析，之后再由单意图 Loop 选择能力。
 - 依赖驱动调度：意图通过 `dependsOn` 组成 DAG；`SERIAL` 模式保证兼容性，`PARALLEL` 模式只并行执行依赖已满足的意图。
 - 真实结果绑定：`CapabilityInvocationBinder` 使用 RFC 6901 JSON Pointer 将前置意图或同一任务上一步的真实输出绑定到能力入参。

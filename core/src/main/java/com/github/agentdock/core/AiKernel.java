@@ -73,6 +73,7 @@ public final class AiKernel {
     private ConversationStatePolicy conversationStatePolicy = new ConversationStatePolicy() { };
     private TaskVerifier taskVerifier = new DefaultTaskVerifier();
     private TaskReplanner taskReplanner = new NoopTaskReplanner();
+    private com.github.agentdock.core.task.TaskConfirmationPolicy taskConfirmationPolicy = (task, context) -> false;
     private PlanReplanner planReplanner = new NoopPlanReplanner();
     private AiExecutionMode executionMode = AiExecutionMode.SERIAL;
     private boolean executionObservationEnabled;
@@ -175,6 +176,12 @@ public final class AiKernel {
         return this;
     }
 
+    /** 仅接受宿主配置的确认核验逻辑；不会读取用户属性中的 confirmed 标记。 */
+    public AiKernel registerTaskConfirmationPolicy(com.github.agentdock.core.task.TaskConfirmationPolicy policy) {
+        this.taskConfirmationPolicy = java.util.Objects.requireNonNull(policy, "任务确认策略不能为空");
+        return this;
+    }
+
     public AiKernel registerTaskReplanner(TaskReplanner replanner) {
         this.taskReplanner = java.util.Objects.requireNonNull(replanner, "任务重规划器不能为空");
         return this;
@@ -273,7 +280,8 @@ public final class AiKernel {
                 new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
                         capabilityResolver, invoker, eventPublisher,
                         effectiveTaskPlanner(), capabilityOutputCombiner,
-                        capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner),
+                        capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner)
+                        .withTaskConfirmationPolicy(taskConfirmationPolicy),
                 chatHistoryStore, executionMode, planReplanner, effectiveAssembler, steeringPlanMode,
                 executionCheckpointStore)
                 .withExecutionObservation(executionObservationEnabled)

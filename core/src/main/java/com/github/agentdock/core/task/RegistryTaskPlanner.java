@@ -53,6 +53,7 @@ public final class RegistryTaskPlanner implements TaskPlanner {
             }
         }
         task.setDefinitionCode(definition.getCode());
+        task.setConfirmationRequired(definition.isConfirmationRequired());
         task.setAllowedCapabilityCodes(definition.getCapabilityCodes());
         task.setSteps(definition.getSteps().stream().map(step -> {
             var copy = new com.github.agentdock.core.model.CapabilityInvocation(step.getCapabilityCode(), step.getArguments());
