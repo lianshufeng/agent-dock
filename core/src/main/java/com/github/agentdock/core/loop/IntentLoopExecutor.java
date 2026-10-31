@@ -172,6 +172,7 @@ public final class IntentLoopExecutor {
         private int plannerCalls;
         private int toolCalls;
         private boolean confirmationOnly;
+        private boolean sideEffectAttempted;
     }
 
     private record VerifiedAttempt(ExecutionAttempt attempt, TaskVerification verification) { }
@@ -184,7 +185,7 @@ public final class IntentLoopExecutor {
                 payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria()));
         TaskVerification verification = verifyAttempt(intent, task, context, attempt);
         VerifiedAttempt original = new VerifiedAttempt(attempt, verification);
-        if (verification.isPassed() || !verification.isReplanRequired()) return original;
+        if (verification.isPassed() || !verification.isReplanRequired() || metrics.sideEffectAttempted) return original;
 
         java.util.Optional<Task> replanned = taskReplanner.replan(task, verification, context);
         if (replanned.isEmpty()) return original;
@@ -203,7 +204,10 @@ public final class IntentLoopExecutor {
 
     private TaskVerification verifyAttempt(IntentCandidate intent, Task task, AiExecutionContext context,
                                            ExecutionAttempt attempt) {
-        TaskVerification verification = attempt.planningFailed()
+        // 等待确认是执行状态，宿主验收器不能将未知结果覆盖为成功或自动重试。
+        TaskVerification verification = attempt.result().getStatus() == IntentStatus.WAITING_USER
+                ? TaskVerification.of(VerificationAction.WAITING_USER, attempt.result().getMessage(), List.of())
+                : attempt.planningFailed()
                 ? TaskVerification.failed(attempt.result().getMessage(), false)
                 : taskVerifier.verify(task, attempt.result(), context);
         context.addVerification(intent.getId(), verification);
@@ -269,7 +273,9 @@ public final class IntentLoopExecutor {
             return IntentResult.failed(intent, exception.getMessage());
         }
         publishToolCalling(context, intent, invocation, definition);
+        metrics.sideEffectAttempted |= definition.isSideEffect();
         CapabilityCallResult call = capabilityInvoker.invoke(intent, context, invocation, MAX_FAILURE_RECOVERY);
+        recordSideEffect(call, metrics);
         metrics.toolCalls++;
         log.info("AI 工具调用完成 executionId={}, intentId={}, capability={}, success={}, recoveries={}",
                 context.getConversation().getExecutionId(), intent.getId(), invocation.getCapabilityCode(),
@@ -457,8 +463,10 @@ public final class IntentLoopExecutor {
                                     "references", invocation.getInputRefs()));
                 }
                 publishToolCalling(context, intent, invocation, definition);
+                metrics.sideEffectAttempted |= definition != null && definition.isSideEffect();
                 CapabilityCallResult call = capabilityInvoker.invoke(intent, context, invocation,
                         MAX_FAILURE_RECOVERY - recoveryAttempts);
+                recordSideEffect(call, metrics);
                 metrics.toolCalls++;
                 CapabilityResult result = call.result();
                 log.info("AI 工具调用完成 executionId={}, intentId={}, capability={}, success={}, recoveries={}",
@@ -501,6 +509,11 @@ public final class IntentLoopExecutor {
         }
         return finalizeObservations(intent, context, history, observations, metrics,
                 Instant.now().isAfter(deadline) ? "已达到意图执行时间边界" : "已达到最大规划轮次");
+    }
+
+    private void recordSideEffect(CapabilityCallResult call, ExecutionMetrics metrics) {
+        CapabilityDefinition actual = capabilities.definition(call.actualCapabilityCode());
+        metrics.sideEffectAttempted |= actual != null && actual.isSideEffect();
     }
 
     /** 去除无效调用，并将意图依赖与工具调用依赖分开。 */

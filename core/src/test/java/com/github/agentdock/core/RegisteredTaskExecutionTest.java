@@ -13,6 +13,59 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RegisteredTaskExecutionTest {
+    @Test void unknownToolOutcomeStopsLoopAndDependentIntent() {
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = kernel().registerCapability(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("write", "写入", Map.of(), Map.of(), true, true, true, null, 2, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                calls.incrementAndGet(); return CapabilityResult.unknown("必须核实真实写入结果");
+            }
+        }).registerIntentAnalyzer((conversation, catalog) -> {
+            IntentCandidate first = new IntentCandidate();
+            first.setId("one"); first.setCode("TEST"); first.setConfidence(1);
+            first.setDescription("写入"); first.setExpectedResult("完成写入"); first.setDependsOn(List.of());
+            IntentCandidate next = new IntentCandidate();
+            next.setId("two"); next.setCode("TEST"); next.setConfidence(1);
+            next.setDescription("后续"); next.setExpectedResult("完成后续"); next.setDependsOn(List.of("one"));
+            return new IntentAdapterResult(List.of(first, next), ContextRequirement.NONE, null);
+        }).registerIntentLoopPlanner(request -> decision("write"))
+                .registerTaskVerifier((task, result, context) -> TaskVerification.passed())
+                .registerTaskReplanner((task, verification, context) -> {
+                    fail("未知结果不能触发任务重规划");
+                    return java.util.Optional.empty();
+                });
+        ConversationResult result = kernel.execute(input());
+        assertEquals(IntentStatus.WAITING_USER, result.getIntentResults().stream()
+                .filter(item -> "one".equals(item.getIntentId())).findFirst().orElseThrow().getStatus());
+        assertEquals(IntentStatus.SKIPPED, result.getIntentResults().stream()
+                .filter(item -> "two".equals(item.getIntentId())).findFirst().orElseThrow().getStatus());
+        assertEquals(1, calls.get());
+    }
+
+    @Test void completedWorkflowWriteCannotBeReplayedByTaskReplanner() {
+        AtomicInteger calls = new AtomicInteger();
+        TaskDefinition definition = new TaskDefinition("workflow", "固定写入", Set.of("TEST"),
+                List.of("write"), "写入后核验");
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.WORKFLOW);
+        definition.setSteps(List.of(new CapabilityInvocation("write", Map.of())));
+        AiKernel kernel = kernel().registerTask(definition).registerCapability(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("write", "写入", Map.of(), Map.of(), true, false, false, null, 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                calls.incrementAndGet(); return CapabilityResult.success(Map.of("id", "real-id"));
+            }
+        }).registerTaskVerifier((task, result, context) -> TaskVerification.failed("仍需人工核验", true))
+                .registerTaskReplanner((task, verification, context) -> {
+                    fail("已经尝试写入，不能自动重放固定流程");
+                    return java.util.Optional.of(task);
+                });
+        assertEquals(IntentStatus.FAILED, kernel.execute(input()).getStatus());
+        assertEquals(1, calls.get());
+    }
+
     @Test void fixedWorkflowBindsRealOutputWithoutCallingPlanner() {
         AtomicInteger calls = new AtomicInteger();
         var first = new CapabilityInvocation("source", Map.of()); first.setInvocationId("first");
