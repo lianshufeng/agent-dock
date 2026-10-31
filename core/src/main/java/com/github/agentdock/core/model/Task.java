@@ -9,6 +9,10 @@ import java.util.Map;
 public class Task {
     private String id;
     private String intentId;
+    /** 命中的注册任务编码；为空时保留旧宿主的执行规则。 */
+    private String definitionCode;
+    /** 已注册任务的能力白名单；只在 definitionCode 非空时生效。 */
+    private List<String> allowedCapabilityCodes = List.of();
     private String objective;
     private String successCriteria;
     private List<String> dependsOn = List.of();

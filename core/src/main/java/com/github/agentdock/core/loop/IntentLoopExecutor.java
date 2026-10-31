@@ -119,6 +119,7 @@ public final class IntentLoopExecutor {
 
     public IntentResult execute(IntentCandidate intent, AiExecutionContext context) {
         Task task = taskPlanner.plan(intent, context);
+        context.setCurrentTask(task);
         if (intent.getCapabilityInvocation() != null) {
             task.setCapabilityInvocation(intent.getCapabilityInvocation());
             // 兼容旧请求：能力调用归属任务后清除意图上的临时绑定。
@@ -127,7 +128,7 @@ public final class IntentLoopExecutor {
         task.setStatus(TaskStatus.RUNNING);
         publish(context, intent, AiEventType.TASK_CREATED, "创建执行任务：" + displayText(task.getObjective(), "处理当前请求"), 22,
                 payload("taskId", task.getId(), "objective", task.getObjective(),
-                        "successCriteria", task.getSuccessCriteria()));
+                        "successCriteria", task.getSuccessCriteria(), "definitionCode", task.getDefinitionCode()));
         long start = System.nanoTime();
         ExecutionMetrics metrics = new ExecutionMetrics();
         try {
@@ -258,6 +259,7 @@ public final class IntentLoopExecutor {
         if (definition == null) return IntentResult.failed(intent, "兜底能力未注册：" + invocation.getCapabilityCode());
         String requestedCapabilityCode = invocation.getCapabilityCode();
         boolean visible = capabilityResolver.resolve(intent, context, capabilities).stream()
+                .filter(candidate -> context.permitsCapability(candidate.getCode()))
                 .anyMatch(candidate -> requestedCapabilityCode.equals(candidate.getCode()));
         if (!visible) return IntentResult.failed(intent, "当前上下文不允许调用能力：" + invocation.getCapabilityCode());
         try {
@@ -293,7 +295,8 @@ public final class IntentLoopExecutor {
         List<ConversationMessage> history = loadHistory(intent, context);
         publish(context, intent, AiEventType.HISTORY_LOADED, "已按当前意图加载 " + history.size() + " 条历史消息", 25,
                 java.util.Map.of("historyCount", history.size(), "requested", intent.getContextRequirement().getHistoryLimit()));
-        List<CapabilityDefinition> eligibleCapabilities = capabilityResolver.resolve(intent, context, capabilities);
+        List<CapabilityDefinition> eligibleCapabilities = capabilityResolver.resolve(intent, context, capabilities)
+                .stream().filter(candidate -> context.permitsCapability(candidate.getCode())).toList();
         if (eligibleCapabilities.isEmpty()) return IntentResult.failed(intent, "当前意图没有注册可用能力");
         int recoveryAttempts = 0;
         int toolCalls = 0;

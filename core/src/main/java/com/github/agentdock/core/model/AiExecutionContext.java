@@ -11,6 +11,13 @@ public final class AiExecutionContext {
     private ConversationContext conversation;
     private CapabilityInvocation currentCapabilityInvocation;
     private Object currentTaskObservation;
+    /** 仅由内核运行时设置，不能从用户属性解析能力授权。 */
+    private Task currentTask;
+
+    public boolean permitsCapability(String code) {
+        return currentTask == null || currentTask.getDefinitionCode() == null
+                || currentTask.getAllowedCapabilityCodes().contains(code);
+    }
     /** 按意图 ID 保存已完成结果，供后续意图读取依赖输出。 */
     private final Map<String, IntentResult> results;
     /** 按意图 ID 保存最近一次任务验收结论，供计划级重规划读取。 */

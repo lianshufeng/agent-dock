@@ -106,6 +106,7 @@ flowchart TD
 ## 关键设计
 
 - 意图与能力分离：`IntentDefinition` 只描述用户目标；`CapabilityDefinition` 独立描述输入、输出、副作用、超时、重试、补偿和替代能力。
+- 任务作为可注册的业务语义：宿主可通过 `TaskDefinition` 和 `TaskRegistry` 声明任务适用的意图、能力范围、执行模式和完成标准；未注册任务的旧宿主继续使用默认任务规划器。
 - 全局一次意图识别：`IntentFactory` 将注册的意图目录汇总后发起一次结构化分析，之后再由单意图 Loop 选择能力。
 - 依赖驱动调度：意图通过 `dependsOn` 组成 DAG；`SERIAL` 模式保证兼容性，`PARALLEL` 模式只并行执行依赖已满足的意图。
 - 真实结果绑定：`CapabilityInvocationBinder` 使用 RFC 6901 JSON Pointer 将前置意图或同一任务上一步的真实输出绑定到能力入参。

@@ -22,6 +22,8 @@ import com.github.agentdock.core.store.ExecutionCheckpointStore;
 import com.github.agentdock.core.loop.IntentLoopExecutor;
 import com.github.agentdock.core.loop.IntentLoopPlanner;
 import com.github.agentdock.core.task.TaskPlanner;
+import com.github.agentdock.core.task.TaskRegistry;
+import com.github.agentdock.core.task.RegistryTaskPlanner;
 import com.github.agentdock.core.provider.ModelUsageRecorder;
 import com.github.agentdock.core.provider.NoopModelUsageRecorder;
 import com.github.agentdock.core.context.ContextAssembler;
@@ -45,6 +47,7 @@ public final class AiKernel {
     private final IntentRegistry intentRegistry = new IntentRegistry();
     private final IntentFactory intentFactory = new IntentFactory(intentRegistry, null);
     private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
+    private final TaskRegistry taskRegistry = new TaskRegistry();
     private final InMemoryAiEventPublisher eventPublisher = new InMemoryAiEventPublisher();
     private ChatHistoryStore chatHistoryStore;
     private ExecutionCheckpointStore executionCheckpointStore;
@@ -104,6 +107,12 @@ public final class AiKernel {
 
     public AiKernel registerTaskPlanner(TaskPlanner planner) {
         this.taskPlanner = planner;
+        return this;
+    }
+
+    /** 注册宿主任务定义；未注册任务时保持原有默认任务行为。 */
+    public AiKernel registerTask(com.github.agentdock.core.model.TaskDefinition definition) {
+        taskRegistry.register(definition);
         return this;
     }
 
@@ -249,18 +258,24 @@ public final class AiKernel {
     /** 使用可选的执行中输入通道；旧宿主继续调用单参数入口即可。 */
     public ConversationResult execute(ConversationContext context, ExecutionSteering steering) {
         java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);
+        taskRegistry.validateReferences(intentRegistry, capabilityRegistry);
         context.setModelUsageRecorder(modelUsageRecorder);
         ContextAssembler effectiveAssembler = effectiveContextAssembler();
         CapabilityInvoker invoker = capabilityInvoker == null
                 ? new DefaultCapabilityInvoker(capabilityRegistry, capabilityVisibilityPolicy) : capabilityInvoker;
         return new AiExecutionEngine(intentFactory, new DefaultResultAggregator(), resultSummarizer, eventPublisher,
                 new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
-                        capabilityResolver, invoker, eventPublisher, taskPlanner, capabilityOutputCombiner,
+                        capabilityResolver, invoker, eventPublisher,
+                        effectiveTaskPlanner(), capabilityOutputCombiner,
                         capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner),
                 chatHistoryStore, executionMode, planReplanner, effectiveAssembler, steeringPlanMode,
                 executionCheckpointStore)
                 .withExecutionObservation(executionObservationEnabled)
                 .execute(context, steering == null ? ExecutionSteering.disabled() : steering);
+    }
+
+    private TaskPlanner effectiveTaskPlanner() {
+        return taskRegistry.isEmpty() ? taskPlanner : new RegistryTaskPlanner(taskRegistry, taskPlanner);
     }
 
     public void shutdownExecutors() {

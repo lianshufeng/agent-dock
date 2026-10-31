@@ -47,6 +47,9 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
     public CapabilityCallResult invoke(IntentCandidate intent, AiExecutionContext context,
                                        CapabilityInvocation invocation, int remainingRecoveries) {
         long startedAt = System.nanoTime();
+        if (!context.permitsCapability(invocation.getCapabilityCode()))
+            return failure("TASK_CAPABILITY_NOT_ALLOWED", "当前任务不允许调用能力: " + invocation.getCapabilityCode(),
+                    0, invocation.getCapabilityCode(), startedAt);
         AiCapability capability = registry.find(invocation.getCapabilityCode());
         if (capability == null) return failure("CAPABILITY_NOT_REGISTERED", "未注册能力: " + invocation.getCapabilityCode(), 0,
                 invocation.getCapabilityCode(), startedAt);
@@ -88,6 +91,7 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
 
         if (!result.isSuccess() && recoveries < remainingRecoveries) {
             for (String fallbackCode : safe(definition.getFallbackCapabilities())) {
+                if (!context.permitsCapability(fallbackCode)) continue;
                 AiCapability fallback = registry.find(fallbackCode);
                 if (fallback == null || !visibilityPolicy.isVisible(intent, fallback.definition(), context)) continue;
                 String fallbackValidation = invocationValidator.validate(fallback.definition(), invocation.getArguments());
