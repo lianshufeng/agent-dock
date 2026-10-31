@@ -74,22 +74,23 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
             context.setCurrentCapabilityInvocation(invocation);
             result = invokeOnce(capability, intent, context, definition.getTimeout());
             result = validateOutput(definition, result);
-            if (result.isSuccess() || !result.isRetryable() || recoveries >= retries) break;
+            result = classifyUnknownOutcome(definition, result);
+            if (result.isSuccess() || result.isOutcomeUnknown() || !result.isRetryable() || recoveries >= retries) break;
             recoveries++;
         } while (true);
 
-        if (!result.isSuccess() && definition.isSideEffect() && definition.isCompensatable()
+        if (!result.isSuccess() && !result.isOutcomeUnknown() && definition.isSideEffect() && definition.isCompensatable()
                 && recoveries < remainingRecoveries) {
             recoveries++;
             compensationAttempted = true;
             CapabilityResult compensation = compensateOnce(capability, intent, context, invocation, result,
                     definition.getTimeout());
             if (!compensation.isSuccess()) {
-                result = CapabilityResult.failure("COMPENSATION_FAILED", compensation.getMessage(), false);
+                result = CapabilityResult.unknown("补偿未能确认完成，必须先核实实际数据：" + compensation.getMessage());
             }
         }
 
-        if (!result.isSuccess() && recoveries < remainingRecoveries) {
+        if (!result.isSuccess() && !result.isOutcomeUnknown() && recoveries < remainingRecoveries) {
             for (String fallbackCode : safe(definition.getFallbackCapabilities())) {
                 if (!context.permitsCapability(fallbackCode)) continue;
                 AiCapability fallback = registry.find(fallbackCode);
@@ -101,8 +102,9 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 context.setCurrentCapabilityInvocation(fallbackInvocation);
                 result = invokeOnce(fallback, intent, context, fallback.definition().getTimeout());
                 result = validateOutput(fallback.definition(), result);
+                result = classifyUnknownOutcome(fallback.definition(), result);
                 actualCapabilityCode = fallbackCode;
-                if (result.isSuccess() || recoveries >= remainingRecoveries) break;
+                if (result.isSuccess() || result.isOutcomeUnknown() || recoveries >= remainingRecoveries) break;
             }
         }
         return new CapabilityCallResult(result, recoveries, actualCapabilityCode, compensationAttempted,
@@ -140,6 +142,14 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         String validationMessage = invocationValidator.validateOutput(definition, result.getOutput());
         return validationMessage == null ? result
                 : CapabilityResult.failure("INVALID_OUTPUT", validationMessage, false);
+    }
+
+    private CapabilityResult classifyUnknownOutcome(CapabilityDefinition definition, CapabilityResult result) {
+        if (!definition.isSideEffect() || result.isSuccess() || result.isOutcomeUnknown()) return result;
+        if (java.util.Set.of("CAPABILITY_TIMEOUT", "CAPABILITY_INTERRUPTED", "CAPABILITY_EXCEPTION",
+                "EMPTY_RESULT", "INVALID_OUTPUT").contains(java.util.Objects.toString(result.getErrorCode(), "")))
+            return CapabilityResult.unknown("外部操作结果尚未确定，请先核实实际状态，禁止重复执行：" + result.getMessage());
+        return result;
     }
 
     private static CapabilityCallResult failure(String code, String message, int recoveries,
