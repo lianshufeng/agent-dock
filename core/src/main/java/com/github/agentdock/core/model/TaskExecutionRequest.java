@@ -6,6 +6,6 @@ import java.util.Map;
 public record TaskExecutionRequest(String taskCode, String intentCode, Map<String, Object> inputs) {
     public TaskExecutionRequest {
         if (taskCode == null || taskCode.isBlank()) throw new IllegalArgumentException("任务编码不能为空");
-        inputs = inputs == null ? Map.of() : Map.copyOf(inputs);
+        inputs = inputs == null ? Map.of() : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(inputs));
     }
 }

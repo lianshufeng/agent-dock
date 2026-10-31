@@ -120,6 +120,7 @@ public class IntentFactory {
         for (IntentCandidate candidate : Optional.ofNullable(analysis.getCandidates()).orElse(List.of())) {
             if (candidate.getConfidence() <= 0) continue;
             IntentCandidate normalized = candidate;
+            // 任务约束只能由显式入口在统一意图分析之后绑定，模型和后处理器不能自行授权。
             normalized.setRequestedTaskCode(null);
             normalized.setTaskInputBindings(Map.of());
             if (normalized.getId() == null || normalized.getId().isBlank()) {

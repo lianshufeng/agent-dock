@@ -27,6 +27,7 @@ public final class TaskRegistry {
         return definition;
     }
 
+    /** 结构化入口只接受任务定义声明的输入，不读取 ConversationContext.attributes。 */
     public void validateTaskInput(TaskDefinition definition, Map<String, Object> input) {
         var contract = new com.github.agentdock.core.model.CapabilityDefinition();
         contract.setInputSchema(definition.getInputSchema());

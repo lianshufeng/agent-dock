@@ -67,7 +67,7 @@ public final class RegistryTaskPlanner implements TaskPlanner {
                     throw new IllegalArgumentException("任务输入不能覆盖业务规划绑定: " + key);
                 bindings.put(key, value);
             });
-            task.setInputBindings(java.util.Map.copyOf(bindings));
+            task.setInputBindings(java.util.Collections.unmodifiableMap(bindings));
         }
         task.setConfirmationRequired(definition.isConfirmationRequired());
         task.setAllowedCapabilityCodes(definition.getCapabilityCodes());

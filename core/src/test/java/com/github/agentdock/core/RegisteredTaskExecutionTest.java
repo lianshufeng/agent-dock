@@ -13,6 +13,48 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RegisteredTaskExecutionTest {
+    @Test void structuredFailureCannotReplanIntoAnotherTask() {
+        AtomicInteger calls = new AtomicInteger();
+        TaskDefinition definition = new TaskDefinition("read", "读取", Set.of("TEST"), List.of("allowed"), "真实结果");
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.DIRECT);
+        definition.setSteps(List.of(new CapabilityInvocation("allowed", Map.of())));
+        AiKernel kernel = kernel().registerTask(definition).registerCapability(capability("allowed", calls))
+                .registerTaskVerifier((task, result, context) -> TaskVerification.failed("需要其他任务", true))
+                .registerTaskReplanner((task, verification, context) -> {
+                    fail("显式任务不得自动重规划到其他任务"); return java.util.Optional.empty();
+                }).registerPlanReplanner(request -> {
+                    fail("显式任务不得扩展全局计划"); return java.util.Optional.empty();
+                });
+        assertEquals(IntentStatus.FAILED, kernel.executeTask(input(),
+                new TaskExecutionRequest("read", "TEST", Map.of())).getStatus());
+        assertEquals(1, calls.get());
+    }
+
+    @Test void structuredCheckpointCannotBeReusedForChangedInputsOrChat() {
+        var saved = new java.util.concurrent.ConcurrentHashMap<String, String>();
+        var store = new com.github.agentdock.core.store.ExecutionCheckpointStore() {
+            public java.util.Optional<String> load(String session, String execution) {
+                return java.util.Optional.ofNullable(saved.get(session + ":" + execution));
+            }
+            public void save(String session, String execution, String snapshot) { saved.put(session + ":" + execution, snapshot); }
+        };
+        AtomicInteger calls = new AtomicInteger();
+        TaskDefinition definition = new TaskDefinition("read", "读取", Set.of("TEST"), List.of("allowed"), "真实结果");
+        definition.setInputSchema(Map.of("query", "string"));
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.DIRECT);
+        definition.setSteps(List.of(new CapabilityInvocation("allowed", Map.of())));
+        AiKernel kernel = kernel().registerExecutionCheckpointStore(store).registerTask(definition)
+                .registerCapability(capability("allowed", calls));
+        ConversationContext conversation = input();
+        TaskExecutionRequest request = new TaskExecutionRequest("read", "TEST", Map.of("query", "original"));
+        assertEquals(IntentStatus.SUCCESS, kernel.executeTask(conversation, request).getStatus());
+        assertEquals(IntentStatus.SUCCESS, kernel.executeTask(conversation, request).getStatus());
+        assertThrows(IllegalArgumentException.class, () -> kernel.executeTask(conversation,
+                new TaskExecutionRequest("read", "TEST", Map.of("query", "changed"))));
+        assertThrows(IllegalArgumentException.class, () -> kernel.execute(conversation));
+        assertEquals(1, calls.get());
+    }
+
     @Test void structuredTaskEntryUsesRegisteredDefinitionAndDoesNotReadAttributes() {
         AtomicInteger calls = new AtomicInteger();
         TaskDefinition definition = new TaskDefinition("structured.reply", "结构化回复", Set.of("TEST"),

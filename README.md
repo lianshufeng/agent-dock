@@ -107,6 +107,8 @@ flowchart TD
 
 - 意图与能力分离：`IntentDefinition` 只描述用户目标；`CapabilityDefinition` 独立描述输入、输出、副作用、超时、重试、补偿和替代能力。
 - 任务作为可注册的业务语义：宿主可通过 `TaskDefinition` 和 `TaskRegistry` 声明任务适用的意图、能力范围、执行模式和完成标准；未注册任务的旧宿主继续使用默认任务规划器。
+- 结构化任务入口：`AiKernel.executeTask(context, new TaskExecutionRequest(taskCode, intentCode, inputs))` 校验任务目录和输入契约，并保留统一意图分析；识别结果须为指定任务的单一匹配意图，不支持通过该入口扩展为其他任务或条件分支。多意图请求使用原聊天入口。宿主自定义规划器、能力可见性、确认、工具契约和结果校验仍然生效。
+- 任务入参复用 `CapabilitySchemaField`：`TaskDefinition.inputContract` 优先于兼容的 `inputSchema`；拒绝未声明字段，支持必填、类型、枚举和基础范围。固定步骤通过 `inputRefs.intentId=$input` 和 JSON Pointer（如 `/name`）将任务绑定值传入已声明工具参数。任务级验收失败不会自动扩展显式请求的任务范围。
 - 固定任务可在 `steps` 中声明工具调用，使用 `DIRECT`（单步骤）或 `WORKFLOW` 模式。内核先检查整组依赖和能力边界，再串行执行、绑定真实输出并统一验收；任一步失败停止后续步骤。`inputRefs.intentId=$task` 仅引用排序后上一步的输出，不表示任意步骤结果查询。执行模式和风险字段没有配置实际步骤或宿主策略时，不会自动产生流程行为。
 - 任务确认：注册任务的 `confirmationRequired=true` 时，默认以 `WAITING_USER` 停止且不调用工具；宿主通过 `registerTaskConfirmationPolicy` 注入服务端核验逻辑后才能放行，客户端 `attributes.confirmed` 不会自动生效。策略须核实用户、会话、作用域及操作内容。当前尚无通用确认令牌、确认界面或持久审批恢复协议；旧业务工具内的确认与权限校验继续保留。
 - 全局一次意图识别：`IntentFactory` 将注册的意图目录汇总后发起一次结构化分析，之后再由单意图 Loop 选择能力。

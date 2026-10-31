@@ -16,6 +16,7 @@ public final class TaskDefinition {
     private Set<String> intentCodes = Set.of();
     private List<String> capabilityCodes = List.of();
     private Map<String, String> inputSchema = Map.of();
+    /** 与工具共用的强类型输入契约；非空时优先于兼容字符串 Schema。 */
     private Map<String, CapabilitySchemaField> inputContract = Map.of();
     private Map<String, String> outputSchema = Map.of();
     private TaskExecutionMode executionMode = TaskExecutionMode.AGENT;

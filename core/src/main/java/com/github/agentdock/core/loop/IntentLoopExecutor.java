@@ -193,7 +193,8 @@ public final class IntentLoopExecutor {
                 payload("taskId", task.getId(), "successCriteria", task.getSuccessCriteria()));
         TaskVerification verification = verifyAttempt(intent, task, context, attempt);
         VerifiedAttempt original = new VerifiedAttempt(attempt, verification);
-        if (verification.isPassed() || !verification.isReplanRequired() || metrics.sideEffectAttempted) return original;
+        if (verification.isPassed() || !verification.isReplanRequired() || metrics.sideEffectAttempted
+                || intent.getRequestedTaskCode() != null) return original;
 
         java.util.Optional<Task> replanned = taskReplanner.replan(task, verification, context);
         if (replanned.isEmpty()) return original;
