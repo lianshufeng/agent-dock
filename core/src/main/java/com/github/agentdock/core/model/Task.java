@@ -13,6 +13,8 @@ public class Task {
     private String definitionCode;
     /** 已注册任务的能力白名单；只在 definitionCode 非空时生效。 */
     private List<String> allowedCapabilityCodes = List.of();
+    /** 编译后的固定流程；为空时保留原动态规划路径。 */
+    private List<CapabilityInvocation> steps = List.of();
     private String objective;
     private String successCriteria;
     private List<String> dependsOn = List.of();

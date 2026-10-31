@@ -13,6 +13,54 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RegisteredTaskExecutionTest {
+    @Test void fixedWorkflowBindsRealOutputWithoutCallingPlanner() {
+        AtomicInteger calls = new AtomicInteger();
+        var first = new CapabilityInvocation("source", Map.of()); first.setInvocationId("first");
+        var second = new CapabilityInvocation("sink", Map.of()); second.setInvocationId("second");
+        second.setDependsOnInvocationIds(List.of("first"));
+        var reference = new IntentInputReference("$task", "/output/value"); reference.setArgumentName("value");
+        second.setInputRefs(List.of(reference));
+        TaskDefinition definition = new TaskDefinition("workflow", "固定流程", Set.of("TEST"),
+                List.of("source", "sink"), "工具完成并绑定真实数据");
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.WORKFLOW);
+        definition.setSteps(List.of(second, first));
+        AiKernel kernel = kernel().registerTask(definition)
+                .registerCapability(new AiCapability() {
+                    public CapabilityDefinition definition() {
+                        return new CapabilityDefinition("source", "读取", Map.of(), Map.of("value", "string"),
+                                false, true, false, null, 0, List.of());
+                    }
+                    public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                        calls.incrementAndGet(); return CapabilityResult.success(Map.of("value", "真实数据"));
+                    }
+                }).registerCapability(new AiCapability() {
+                    public CapabilityDefinition definition() {
+                        return new CapabilityDefinition("sink", "处理", Map.of("value", "string"), Map.of(),
+                                false, true, false, null, 0, List.of());
+                    }
+                    public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                        assertEquals("真实数据", context.getCurrentCapabilityInvocation().getArguments().get("value"));
+                        calls.incrementAndGet(); return CapabilityResult.success("处理完成");
+                    }
+                }).registerIntentLoopPlanner(request -> { throw new AssertionError("固定流程不能调用模型规划器"); });
+        assertEquals(IntentStatus.SUCCESS, kernel.execute(input()).getStatus());
+        assertEquals(2, calls.get());
+        assertEquals("$task", second.getInputRefs().get(0).getIntentId());
+    }
+
+    @Test void fixedWorkflowPreflightsMissingDependencyBeforeAnyToolRuns() {
+        AtomicInteger calls = new AtomicInteger();
+        var first = new CapabilityInvocation("allowed", Map.of()); first.setInvocationId("first");
+        var second = new CapabilityInvocation("allowed", Map.of()); second.setInvocationId("second");
+        second.setDependsOnInvocationIds(List.of("missing"));
+        TaskDefinition definition = new TaskDefinition("workflow", "固定流程", Set.of("TEST"), List.of("allowed"), "完成");
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.WORKFLOW);
+        definition.setSteps(List.of(first, second));
+        assertEquals(IntentStatus.FAILED, kernel().registerTask(definition)
+                .registerCapability(capability("allowed", calls)).execute(input()).getStatus());
+        assertEquals(0, calls.get());
+    }
+
     @Test void registeredBoundaryFiltersPlannerAndRejectsForbiddenInvocation() {
         AtomicInteger calls = new AtomicInteger();
         AiKernel kernel = kernel().registerCapability(capability("allowed", calls))

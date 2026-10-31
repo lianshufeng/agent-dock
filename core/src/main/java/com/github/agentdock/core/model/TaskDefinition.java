@@ -21,6 +21,11 @@ public final class TaskDefinition {
     private CapabilityRiskLevel riskLevel = CapabilityRiskLevel.READ_ONLY;
     private boolean confirmationRequired;
     private String successCriteria;
+    /** 固定工具流程；输入引用 $task 表示本任务的上一步真实输出。 */
+    private List<CapabilityInvocation> steps = List.of();
+
+    public List<CapabilityInvocation> getSteps() { return steps; }
+    public void setSteps(List<CapabilityInvocation> value) { steps = value == null ? List.of() : List.copyOf(value); }
 
     public TaskDefinition() {
     }
@@ -66,5 +71,15 @@ public final class TaskDefinition {
         if (capabilityCodes == null) throw new IllegalArgumentException("任务能力目录不能为空");
         if (successCriteria == null || successCriteria.isBlank()) throw new IllegalArgumentException("任务完成标准不能为空");
         Objects.requireNonNull(executionMode, "任务执行模式不能为空");
+        if (!steps.isEmpty()) {
+            if (executionMode == TaskExecutionMode.AGENT)
+                throw new IllegalArgumentException("固定步骤必须使用DIRECT或WORKFLOW模式");
+            if (executionMode == TaskExecutionMode.DIRECT && steps.size() != 1)
+                throw new IllegalArgumentException("DIRECT任务必须只有一个步骤");
+            for (CapabilityInvocation step : steps) {
+                if (step == null || !capabilityCodes.contains(step.getCapabilityCode()))
+                    throw new IllegalArgumentException("固定步骤引用了任务能力边界外的工具");
+            }
+        }
     }
 }

@@ -284,8 +284,44 @@ public final class IntentLoopExecutor {
         return IntentResult.failed(intent, call.result().getMessage());
     }
 
+    /** 固定流程复用统一调用器；先校验整组依赖和能力边界，再产生任何外部副作用。 */
+    private IntentResult executeWorkflow(IntentCandidate intent, Task task, AiExecutionContext context,
+                                         ExecutionMetrics metrics) {
+        List<CapabilityInvocation> ordered;
+        try {
+            ordered = CapabilityInvocationOrder.order(task.getSteps());
+            if (ordered.size() > MAX_TOOL_CALLS) return IntentResult.failed(intent, "固定流程超过工具调用预算");
+            var visible = capabilityResolver.resolve(intent, context, capabilities).stream()
+                    .map(CapabilityDefinition::getCode).collect(java.util.stream.Collectors.toSet());
+            for (CapabilityInvocation step : ordered) {
+                if (step == null || !context.permitsCapability(step.getCapabilityCode())
+                        || !visible.contains(step.getCapabilityCode()))
+                    return IntentResult.failed(intent, "固定流程包含未注册或当前任务不允许的能力");
+            }
+        } catch (IllegalArgumentException invalid) {
+            return IntentResult.failed(intent, invalid.getMessage());
+        }
+        Instant deadline = Instant.now().plus(MAX_INTENT_DURATION);
+        List<Object> outputs = new ArrayList<>();
+        IntentResult last = null;
+        for (CapabilityInvocation step : ordered) {
+            if (Thread.currentThread().isInterrupted()) return IntentResult.failed(intent, "固定流程已中断");
+            if (Instant.now().isAfter(deadline) || metrics.toolCalls >= MAX_TOOL_CALLS)
+                return IntentResult.failed(intent, "固定流程已达到执行预算");
+            context.setCurrentTaskObservation(last);
+            task.setCapabilityInvocation(step);
+            last = executeBoundInvocation(intent, task, context, metrics);
+            if (last.getStatus() != IntentStatus.SUCCESS) return last;
+            if (last.getOutput() != null) outputs.add(last.getOutput());
+        }
+        return IntentResult.success(intent, outputCombiner.combine(intent, outputs));
+    }
+
     private IntentResult executeInternal(IntentCandidate intent, Task task, AiExecutionContext context, ExecutionMetrics metrics) {
         log.info("AI 意图 Loop 开始 executionId={}, intentId={}, code={}", context.getConversation().getExecutionId(), intent.getId(), intent.getCode());
+        if (!task.getSteps().isEmpty()) {
+            return executeWorkflow(intent, task, context, metrics);
+        }
         if (task.getCapabilityInvocation() != null) {
             return executeBoundInvocation(intent, task, context, metrics);
         }

@@ -54,6 +54,20 @@ public final class RegistryTaskPlanner implements TaskPlanner {
         }
         task.setDefinitionCode(definition.getCode());
         task.setAllowedCapabilityCodes(definition.getCapabilityCodes());
+        task.setSteps(definition.getSteps().stream().map(step -> {
+            var copy = new com.github.agentdock.core.model.CapabilityInvocation(step.getCapabilityCode(), step.getArguments());
+            copy.setInvocationId(step.getInvocationId());
+            copy.setDependsOnInvocationIds(step.getDependsOnInvocationIds() == null ? java.util.List.of()
+                    : java.util.List.copyOf(step.getDependsOnInvocationIds()));
+            copy.setInputRefs(step.getInputRefs() == null ? java.util.List.of() : step.getInputRefs().stream().map(ref -> {
+                var reference = new com.github.agentdock.core.model.IntentInputReference(
+                        "$task".equals(ref.getIntentId()) ? intent.getId() : ref.getIntentId(), ref.getPath());
+                reference.setArgumentName(ref.getArgumentName());
+                reference.setName(ref.getName());
+                return reference;
+            }).toList());
+            return copy;
+        }).toList());
         // 保留当前请求的目标与领域绑定，只补充注册任务的完成约束。
         task.setSuccessCriteria(task.getSuccessCriteria() == null ? definition.getSuccessCriteria()
                 : task.getSuccessCriteria() + "；" + definition.getSuccessCriteria());

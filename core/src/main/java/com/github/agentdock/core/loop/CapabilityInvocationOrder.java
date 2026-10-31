@@ -13,7 +13,7 @@ final class CapabilityInvocationOrder {
     private CapabilityInvocationOrder() { }
 
     static List<CapabilityInvocation> order(List<CapabilityInvocation> invocations) {
-        if (invocations == null || invocations.size() < 2) {
+        if (invocations == null || invocations.isEmpty()) {
             return invocations == null ? List.of() : invocations;
         }
         Map<String, CapabilityInvocation> byId = new LinkedHashMap<>();
