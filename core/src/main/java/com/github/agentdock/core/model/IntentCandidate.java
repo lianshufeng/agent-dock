@@ -32,6 +32,9 @@ public class IntentCandidate {
     private ContextRequirement contextRequirement;
     /** LLM 为实现该意图选择的能力及其调用参数。 */
     private CapabilityInvocation capabilityInvocation;
+    /** 由受信任的结构化任务入口设置；自然语言分析不会填写。 */
+    private String requestedTaskCode;
+    private java.util.Map<String, Object> taskInputBindings = java.util.Map.of();
     public IntentCandidate() { }
     public IntentCandidate(String id,String code,String description,String expectedResult,double confidence,int priority,int originalOrder,List<String> dependsOn,IntentComplexity complexity,ContextRequirement contextRequirement,CapabilityInvocation capabilityInvocation) {
         this.id=id;this.code=code;this.description=description;this.expectedResult=expectedResult;this.confidence=confidence;this.priority=priority;this.originalOrder=originalOrder;this.dependsOn=dependsOn==null?List.of():List.copyOf(dependsOn);this.complexity=complexity==null?IntentComplexity.SIMPLE:complexity;this.contextRequirement=contextRequirement==null?ContextRequirement.NONE:contextRequirement;this.capabilityInvocation=capabilityInvocation;

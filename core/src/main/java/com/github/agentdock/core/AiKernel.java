@@ -268,6 +268,53 @@ public final class AiKernel {
         return execute(context, ExecutionSteering.disabled());
     }
 
+    /** 结构化任务入口：任务、意图和输入均在内核注册目录中校验后执行。 */
+    public ConversationResult executeTask(ConversationContext context,
+                                           com.github.agentdock.core.model.TaskExecutionRequest request) {
+        java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);
+        java.util.Objects.requireNonNull(request, "结构化任务请求不能为空");
+        String intentCode = validateTaskRequest(request);
+        var definition = taskRegistry.require(request.taskCode());
+        var intent = new com.github.agentdock.core.model.IntentCandidate();
+        intent.setId("task-" + java.util.UUID.randomUUID());
+        intent.setCode(intentCode);
+        intent.setDescription(definition.getDescription());
+        intent.setExpectedResult(definition.getSuccessCriteria());
+        intent.setConfidence(1.0);
+        intent.setDependsOn(java.util.List.of());
+        intent.setContextRequirement(com.github.agentdock.core.model.ContextRequirement.NONE);
+        intent.setRequestedTaskCode(definition.getCode());
+        intent.setTaskInputBindings(request.inputs());
+        context.setModelUsageRecorder(modelUsageRecorder);
+        ContextAssembler effectiveAssembler = effectiveContextAssembler();
+        CapabilityInvoker invoker = capabilityInvoker == null
+                ? new DefaultCapabilityInvoker(capabilityRegistry, capabilityVisibilityPolicy) : capabilityInvoker;
+        return new AiExecutionEngine(intentFactory, new DefaultResultAggregator(), resultSummarizer, eventPublisher,
+                new IntentLoopExecutor(intentLoopPlanner, capabilityRegistry, chatHistoryStore,
+                        capabilityResolver, invoker, eventPublisher, effectiveTaskPlanner(), capabilityOutputCombiner,
+                        capabilityCandidateSelector, effectiveAssembler, taskVerifier, taskReplanner)
+                        .withTaskConfirmationPolicy(taskConfirmationPolicy),
+                chatHistoryStore, executionMode, planReplanner, effectiveAssembler, steeringPlanMode,
+                executionCheckpointStore).withExecutionObservation(executionObservationEnabled)
+                .executeTask(context, intent);
+    }
+
+    /** 宿主可在创建异步执行记录前校验请求；返回解析后的意图编码。 */
+    public String validateTaskRequest(com.github.agentdock.core.model.TaskExecutionRequest request) {
+        java.util.Objects.requireNonNull(request, "结构化任务请求不能为空");
+        taskRegistry.validateReferences(intentRegistry, capabilityRegistry);
+        var definition = taskRegistry.require(request.taskCode());
+        String intentCode = request.intentCode();
+        if (intentCode == null || intentCode.isBlank()) {
+            if (definition.getIntentCodes().size() != 1)
+                throw new IllegalArgumentException("多意图任务必须显式指定 intentCode");
+            intentCode = definition.getIntentCodes().iterator().next();
+        }
+        if (!definition.supports(intentCode)) throw new IllegalArgumentException("任务不支持指定意图: " + intentCode);
+        taskRegistry.validateTaskInput(definition, request.inputs());
+        return intentCode;
+    }
+
     /** 使用可选的执行中输入通道；旧宿主继续调用单参数入口即可。 */
     public ConversationResult execute(ConversationContext context, ExecutionSteering steering) {
         java.util.Objects.requireNonNull(context, "会话上下文不能为空").setEventPublisher(eventPublisher);

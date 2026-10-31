@@ -122,8 +122,18 @@ public class AiExecutionEngine {
         return execute(conversation, ExecutionSteering.disabled());
     }
 
+    /** 执行宿主已校验的结构化任务；仍统一识别意图并核对请求的任务边界。 */
+    public ConversationResult executeTask(ConversationContext conversation, IntentCandidate explicitIntent) {
+        return executeInternal(conversation, ExecutionSteering.disabled(), explicitIntent);
+    }
+
     /** 按计划执行，并在批次边界消费宿主投递的补充输入。 */
     public ConversationResult execute(ConversationContext conversation, ExecutionSteering steering) {
+        return executeInternal(conversation, steering, null);
+    }
+
+    private ConversationResult executeInternal(ConversationContext conversation, ExecutionSteering steering,
+                                                IntentCandidate explicitIntent) {
         lastObservationSnapshot = null;
         if (conversation == null) throw new IllegalArgumentException("会话上下文不能为空");
         steering = steering == null ? ExecutionSteering.disabled() : steering;
@@ -133,6 +143,15 @@ public class AiExecutionEngine {
         log.info("AI 执行开始 executionId={}, conversationId={}, inputLength={}", conversation.getExecutionId(),
                 conversation.getConversationId(), conversation.getUserInput() == null ? 0 : conversation.getUserInput().length());
         ExecutionSnapshot saved = loadCheckpoint(conversation);
+        if (saved != null) {
+            var intents = saved.getPlan().orderedIntents();
+            boolean structured = intents.stream().anyMatch(item -> item.getRequestedTaskCode() != null);
+            if ((explicitIntent == null && structured) || (explicitIntent != null && (intents.size() != 1
+                    || !java.util.Objects.equals(explicitIntent.getRequestedTaskCode(), intents.get(0).getRequestedTaskCode())
+                    || !java.util.Objects.equals(explicitIntent.getCode(), intents.get(0).getCode())
+                    || !java.util.Objects.equals(explicitIntent.getTaskInputBindings(), intents.get(0).getTaskInputBindings()))))
+                throw new IllegalArgumentException("恢复请求与已保存的结构化任务不一致");
+        }
         Map<String, String> timeAnchor = saved != null && saved.getPlan().getRequestTimeAnchor() != null
                 && !saved.getPlan().getRequestTimeAnchor().isEmpty()
                 ? saved.getPlan().getRequestTimeAnchor()
@@ -151,6 +170,14 @@ public class AiExecutionEngine {
             IntentAnalysis analysis;
             try {
                 analysis = intentFactory.analyze(conversation);
+                if (explicitIntent != null && !analysis.requiresClarification()) {
+                    if (!analysis.getDeferredBranches().isEmpty() || analysis.getOrderedIntents().size() != 1
+                            || !explicitIntent.getCode().equals(analysis.getOrderedIntents().get(0).getCode()))
+                        throw new IllegalArgumentException("识别结果与指定任务的单一意图不一致，请调整请求或改用聊天入口");
+                    IntentCandidate identified = analysis.getOrderedIntents().get(0);
+                    identified.setRequestedTaskCode(explicitIntent.getRequestedTaskCode());
+                    identified.setTaskInputBindings(explicitIntent.getTaskInputBindings());
+                }
             } catch (RuntimeException exception) {
                 log.error("AI 意图识别失败 executionId={}: {}", conversation.getExecutionId(), exception.getMessage(), exception);
                 ConversationResult failed = new ConversationResult(IntentStatus.FAILED, List.of(), exception.getMessage());
@@ -639,6 +666,7 @@ public class AiExecutionEngine {
 
     private void attemptReplan(ExecutionPlan plan, PlanNode node, IntentResult result,
                                AiExecutionContext context, List<IntentResult> results) {
+        if (node.getIntent().getRequestedTaskCode() != null) return;
         TaskVerification verification = context.getVerifications().get(node.getId());
         if (verification == null || verification.getAction() != VerificationAction.REPLAN
                 || plan.getReplanCount() >= Math.max(MAX_PLAN_VERSIONS - 1, 0)) return;

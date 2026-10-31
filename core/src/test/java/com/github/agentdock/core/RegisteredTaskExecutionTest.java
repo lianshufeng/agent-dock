@@ -13,6 +13,67 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RegisteredTaskExecutionTest {
+    @Test void structuredTaskEntryUsesRegisteredDefinitionAndDoesNotReadAttributes() {
+        AtomicInteger calls = new AtomicInteger();
+        TaskDefinition definition = new TaskDefinition("structured.reply", "结构化回复", Set.of("TEST"),
+                List.of("allowed"), "得到真实结果");
+        definition.setExecutionMode(com.github.agentdock.core.task.TaskExecutionMode.DIRECT);
+        definition.setInputContract(Map.of("requiredText", new CapabilitySchemaField("string", true)));
+        var step = new CapabilityInvocation("allowed", Map.of());
+        var input = new IntentInputReference("$input", "/requiredText"); input.setArgumentName("text");
+        step.setInputRefs(List.of(input));
+        definition.setSteps(List.of(step));
+        AiKernel kernel = kernel().registerTask(definition).registerCapability(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("allowed", "读取输入", Map.of("text", "string"), Map.of(),
+                        false, true, false, null, 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                assertEquals("真实输入", context.getCurrentCapabilityInvocation().getArguments().get("text"));
+                calls.incrementAndGet(); return CapabilityResult.success(Map.of("answer", "真实结果"));
+            }
+        });
+        ConversationContext conversation = input();
+        conversation.setAttributes(Map.of("taskCode", "forged", "inputs", Map.of("requiredText", 1)));
+        ConversationResult result = kernel.executeTask(conversation,
+                new TaskExecutionRequest("structured.reply", "TEST", Map.of("requiredText", "真实输入")));
+        assertEquals(IntentStatus.SUCCESS, result.getStatus());
+        assertEquals(1, calls.get());
+    }
+
+    @Test void structuredTaskEntryStillAnalyzesIntentAndRejectsMismatchBeforeToolCall() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger analyses = new AtomicInteger();
+        AiKernel kernel = kernel().registerIntent(new IntentDefinition("OTHER", "其他目标"))
+                .registerTask(new TaskDefinition("structured.reply", "结构化回复", Set.of("OTHER"),
+                        List.of("allowed"), "得到真实结果"))
+                .registerCapability(capability("allowed", calls))
+                .registerIntentAnalyzer((conversation, catalog) -> {
+                    analyses.incrementAndGet();
+                    IntentCandidate identified = new IntentCandidate();
+                    identified.setId("one"); identified.setCode("TEST"); identified.setConfidence(1);
+                    identified.setDescription("不同目标"); identified.setExpectedResult("其他结果");
+                    return new IntentAdapterResult(List.of(identified), ContextRequirement.NONE, null);
+                });
+        assertEquals(IntentStatus.FAILED, kernel.executeTask(input(),
+                new TaskExecutionRequest("structured.reply", "OTHER", Map.of())).getStatus());
+        assertEquals(1, analyses.get());
+        assertEquals(0, calls.get());
+    }
+
+    @Test void structuredTaskEntryRejectsUndeclaredOrMissingInputBeforeToolCall() {
+        AtomicInteger calls = new AtomicInteger();
+        TaskDefinition definition = new TaskDefinition("structured.reply", "结构化回复", Set.of("TEST"),
+                List.of("allowed"), "得到真实结果");
+        definition.setInputContract(Map.of("requiredText", new CapabilitySchemaField("string", true)));
+        AiKernel kernel = kernel().registerTask(definition).registerCapability(capability("allowed", calls));
+        assertThrows(IllegalArgumentException.class, () -> kernel.executeTask(input(),
+                new TaskExecutionRequest("structured.reply", "TEST", Map.of())));
+        assertThrows(IllegalArgumentException.class, () -> kernel.executeTask(input(),
+                new TaskExecutionRequest("structured.reply", "TEST", Map.of("requiredText", "x", "extra", true))));
+        assertEquals(0, calls.get());
+    }
+
     @Test void confirmationRequiredCannotBeBypassedByClientAttributesOrVerifier() {
         AtomicInteger calls = new AtomicInteger();
         AiKernel kernel = confirmedKernel(calls)

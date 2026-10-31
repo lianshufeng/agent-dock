@@ -16,6 +16,7 @@ public final class TaskDefinition {
     private Set<String> intentCodes = Set.of();
     private List<String> capabilityCodes = List.of();
     private Map<String, String> inputSchema = Map.of();
+    private Map<String, CapabilitySchemaField> inputContract = Map.of();
     private Map<String, String> outputSchema = Map.of();
     private TaskExecutionMode executionMode = TaskExecutionMode.AGENT;
     private CapabilityRiskLevel riskLevel = CapabilityRiskLevel.READ_ONLY;
@@ -48,6 +49,10 @@ public final class TaskDefinition {
     public List<String> getCapabilityCodes() { return capabilityCodes; }
     public void setCapabilityCodes(List<String> capabilityCodes) { this.capabilityCodes = capabilityCodes == null ? List.of() : List.copyOf(capabilityCodes); }
     public Map<String, String> getInputSchema() { return inputSchema; }
+    public Map<String, CapabilitySchemaField> getInputContract() { return inputContract; }
+    public void setInputContract(Map<String, CapabilitySchemaField> value) {
+        inputContract = value == null ? Map.of() : Map.copyOf(value);
+    }
     public void setInputSchema(Map<String, String> inputSchema) { this.inputSchema = inputSchema == null ? Map.of() : Map.copyOf(inputSchema); }
     public Map<String, String> getOutputSchema() { return outputSchema; }
     public void setOutputSchema(Map<String, String> outputSchema) { this.outputSchema = outputSchema == null ? Map.of() : Map.copyOf(outputSchema); }

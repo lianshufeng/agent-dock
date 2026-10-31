@@ -23,9 +23,15 @@ public final class CapabilityInvocationBinder {
                 Object previous = context.getCurrentTaskObservation();
                 if (previous instanceof IntentResult previousResult) source = previousResult;
             }
-            if (source == null || source.getStatus() != IntentStatus.SUCCESS)
+            if (!"$input".equals(reference.getIntentId()) && (source == null || source.getStatus() != IntentStatus.SUCCESS))
                 throw new IllegalArgumentException("引用的前置意图尚未成功: " + reference.getIntentId());
-            Object value = resolve(source, reference.getPath());
+            Object value;
+            if ("$input".equals(reference.getIntentId())) {
+                if (context.getCurrentTask() == null) throw new IllegalArgumentException("当前任务没有可绑定输入");
+                value = resolve(context.getCurrentTask().getInputBindings(), reference.getPath());
+            } else {
+                value = resolve(source, reference.getPath());
+            }
             String target = targetArgument(reference, definition);
             validateValue(target, value, definition);
             if (target.equals("inputs") || reference.getName() != null && !reference.getName().isBlank()) {
@@ -64,7 +70,7 @@ public final class CapabilityInvocationBinder {
     private void validate(IntentCandidate intent, IntentInputReference reference, CapabilityDefinition definition) {
         if (reference == null || reference.getIntentId() == null
                 || !(Objects.requireNonNullElse(intent.getDependsOn(), List.<String>of()).contains(reference.getIntentId())
-                || intent.getId().equals(reference.getIntentId())))
+                || intent.getId().equals(reference.getIntentId()) || "$input".equals(reference.getIntentId())))
             throw new IllegalArgumentException("能力输入只能引用当前意图的前置依赖");
         if (reference.getArgumentName() == null || reference.getArgumentName().contains(".")
                 || definition.getInputSchema() == null
@@ -79,7 +85,7 @@ public final class CapabilityInvocationBinder {
                 ? reference.getArgumentName() : "inputs";
     }
 
-    private Object resolve(IntentResult result, String path) {
+    private Object resolve(Object result, String path) {
         if (path == null || path.isBlank()) throw new IllegalArgumentException("INVALID_INPUT_REF_PATH: 前置结果引用路径不能为空");
         if (!path.startsWith("/") || path.contains("[") || path.contains("]"))
             throw new IllegalArgumentException("INVALID_INPUT_REF_PATH: 路径必须符合 RFC 6901 JSON Pointer 格式: " + path);

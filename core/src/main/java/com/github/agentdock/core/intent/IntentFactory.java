@@ -120,6 +120,8 @@ public class IntentFactory {
         for (IntentCandidate candidate : Optional.ofNullable(analysis.getCandidates()).orElse(List.of())) {
             if (candidate.getConfidence() <= 0) continue;
             IntentCandidate normalized = candidate;
+            normalized.setRequestedTaskCode(null);
+            normalized.setTaskInputBindings(Map.of());
             if (normalized.getId() == null || normalized.getId().isBlank()) {
                 normalized.setId("intent-" + order);
             }

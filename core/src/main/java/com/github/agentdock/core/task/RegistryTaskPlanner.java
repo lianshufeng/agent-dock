@@ -37,7 +37,13 @@ public final class RegistryTaskPlanner implements TaskPlanner {
         var candidates = registry.findByIntent(intent.getCode());
         // 尚未提供语义选择器时，多候选必须保留原规划路径，不能按注册顺序猜测业务目标。
         TaskDefinition definition;
-        if (task.getDefinitionCode() != null) {
+        if (intent.getRequestedTaskCode() != null && !intent.getRequestedTaskCode().isBlank()) {
+            definition = registry.find(intent.getRequestedTaskCode());
+            if (definition == null || !definition.supports(intent.getCode()))
+                throw new IllegalArgumentException("结构化任务与意图不匹配: " + intent.getRequestedTaskCode());
+            if (task.getDefinitionCode() != null && !definition.getCode().equals(task.getDefinitionCode()))
+                throw new IllegalArgumentException("业务规划结果与指定任务不一致: " + task.getDefinitionCode());
+        } else if (task.getDefinitionCode() != null) {
             definition = registry.find(task.getDefinitionCode());
             if (definition == null || !definition.supports(intent.getCode()))
                 throw new IllegalArgumentException("任务规划器选择了未注册或不适用的任务: " + task.getDefinitionCode());
@@ -53,6 +59,16 @@ public final class RegistryTaskPlanner implements TaskPlanner {
             }
         }
         task.setDefinitionCode(definition.getCode());
+        if (intent.getRequestedTaskCode() != null && !intent.getRequestedTaskCode().isBlank()) {
+            var bindings = new java.util.LinkedHashMap<String, Object>(task.getInputBindings() == null
+                    ? java.util.Map.of() : task.getInputBindings());
+            intent.getTaskInputBindings().forEach((key, value) -> {
+                if (bindings.containsKey(key) && !java.util.Objects.equals(bindings.get(key), value))
+                    throw new IllegalArgumentException("任务输入不能覆盖业务规划绑定: " + key);
+                bindings.put(key, value);
+            });
+            task.setInputBindings(java.util.Map.copyOf(bindings));
+        }
         task.setConfirmationRequired(definition.isConfirmationRequired());
         task.setAllowedCapabilityCodes(definition.getCapabilityCodes());
         task.setSteps(definition.getSteps().stream().map(step -> {

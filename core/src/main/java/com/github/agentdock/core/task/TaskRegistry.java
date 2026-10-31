@@ -21,6 +21,20 @@ public final class TaskRegistry {
 
     public TaskDefinition find(String code) { return definitions.get(code); }
 
+    public TaskDefinition require(String code) {
+        TaskDefinition definition = find(code);
+        if (definition == null) throw new IllegalArgumentException("未注册任务: " + code);
+        return definition;
+    }
+
+    public void validateTaskInput(TaskDefinition definition, Map<String, Object> input) {
+        var contract = new com.github.agentdock.core.model.CapabilityDefinition();
+        contract.setInputSchema(definition.getInputSchema());
+        contract.setInputContract(definition.getInputContract());
+        String issue = new com.github.agentdock.core.capability.CapabilityInvocationValidator().validate(contract, input);
+        if (issue != null) throw new IllegalArgumentException("任务输入无效：" + issue);
+    }
+
     public List<TaskDefinition> definitions() { return List.copyOf(definitions.values()); }
 
     public List<TaskDefinition> findByIntent(String intentCode) {
