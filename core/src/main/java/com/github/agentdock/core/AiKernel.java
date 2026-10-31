@@ -48,6 +48,12 @@ public final class AiKernel {
     private final IntentFactory intentFactory = new IntentFactory(intentRegistry, null);
     private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
     private final TaskRegistry taskRegistry = new TaskRegistry();
+    private com.github.agentdock.core.task.TaskSelector taskSelector;
+
+    public AiKernel registerTaskSelector(com.github.agentdock.core.task.TaskSelector selector) {
+        this.taskSelector = java.util.Objects.requireNonNull(selector, "任务选择器不能为空");
+        return this;
+    }
     private final InMemoryAiEventPublisher eventPublisher = new InMemoryAiEventPublisher();
     private ChatHistoryStore chatHistoryStore;
     private ExecutionCheckpointStore executionCheckpointStore;
@@ -275,7 +281,7 @@ public final class AiKernel {
     }
 
     private TaskPlanner effectiveTaskPlanner() {
-        return taskRegistry.isEmpty() ? taskPlanner : new RegistryTaskPlanner(taskRegistry, taskPlanner);
+        return taskRegistry.isEmpty() ? taskPlanner : new RegistryTaskPlanner(taskRegistry, taskPlanner, taskSelector);
     }
 
     public void shutdownExecutors() {

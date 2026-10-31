@@ -13,15 +13,21 @@ public final class RegistryTaskPlanner implements TaskPlanner {
     private final TaskRegistry registry;
     private final TaskPlanner fallback;
     private final boolean customPlanner;
+    private final TaskSelector selector;
 
     public RegistryTaskPlanner(TaskRegistry registry) {
         this(registry, new DefaultTaskPlanner());
     }
 
     public RegistryTaskPlanner(TaskRegistry registry, TaskPlanner fallback) {
+        this(registry, fallback, null);
+    }
+
+    public RegistryTaskPlanner(TaskRegistry registry, TaskPlanner fallback, TaskSelector selector) {
         this.registry = java.util.Objects.requireNonNull(registry, "任务注册表不能为空");
         this.fallback = fallback == null ? new DefaultTaskPlanner() : fallback;
         this.customPlanner = fallback != null && !(fallback instanceof DefaultTaskPlanner);
+        this.selector = selector;
     }
 
     @Override
@@ -36,8 +42,15 @@ public final class RegistryTaskPlanner implements TaskPlanner {
             if (definition == null || !definition.supports(intent.getCode()))
                 throw new IllegalArgumentException("任务规划器选择了未注册或不适用的任务: " + task.getDefinitionCode());
         } else {
-            if (customPlanner || candidates.size() != 1) return task;
-            definition = candidates.get(0);
+            if (customPlanner || candidates.isEmpty()) return task;
+            if (candidates.size() == 1) definition = candidates.get(0);
+            else {
+                if (selector == null) return task;
+                String code = selector.select(intent, context, java.util.List.copyOf(candidates));
+                if (code == null || code.isBlank()) return task;
+                definition = candidates.stream().filter(item -> code.equals(item.getCode())).findFirst()
+                        .orElseThrow(() -> new IllegalArgumentException("任务选择器返回了候选范围外的任务: " + code));
+            }
         }
         task.setDefinitionCode(definition.getCode());
         task.setAllowedCapabilityCodes(definition.getCapabilityCodes());

@@ -64,4 +64,20 @@ class TaskRegistryTest {
         assertThrows(IllegalStateException.class,
                 () -> registry.validateReferences(new IntentRegistry(), new CapabilityRegistry()));
     }
+
+    @Test
+    void selectorChoosesAmongMultipleTasksWithoutGuessingRegistrationOrder() {
+        TaskRegistry registry = new TaskRegistry();
+        registry.register(new TaskDefinition("list", "列表", Set.of("LOCATE"), List.of("list"), "返回列表"));
+        registry.register(new TaskDefinition("detail", "详情", Set.of("LOCATE"), List.of("detail"), "返回详情"));
+        IntentCandidate intent = new IntentCandidate();
+        intent.setId("intent-3"); intent.setCode("LOCATE"); intent.setDescription("查看详情");
+        Task task = new RegistryTaskPlanner(registry, null,
+                (candidate, context, definitions) -> "detail").plan(intent, null);
+        assertEquals("detail", task.getDefinitionCode());
+        assertEquals(List.of("detail"), task.getAllowedCapabilityCodes());
+        assertNull(new RegistryTaskPlanner(registry).plan(intent, null).getDefinitionCode());
+        assertThrows(IllegalArgumentException.class, () -> new RegistryTaskPlanner(registry, null,
+                (candidate, context, definitions) -> "unknown").plan(intent, null));
+    }
 }
