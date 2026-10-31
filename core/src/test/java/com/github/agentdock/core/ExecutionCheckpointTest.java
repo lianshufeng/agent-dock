@@ -15,6 +15,35 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ExecutionCheckpointTest {
+    @Test void restoredPlanSkipsHandledSteeringAndKeepsMergedConstraints() throws Exception {
+        InterruptOnceStore store = new InterruptOnceStore(); store.interrupted = true;
+        ExecutionPlan plan = ExecutionPlan.from("run-steer", List.of(intent("pending", List.of())));
+        plan.getHandledSteeringInputIds().add("steer-1");
+        ExecutionSnapshot snapshot = new ExecutionSnapshot(); snapshot.setPlan(plan);
+        snapshot.setExecutionInput("原始目标\n\n只修改备注，不改名称");
+        store.value = new ObjectMapper().writeValueAsString(snapshot);
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store)
+                .registerCapability(new AiCapability() {
+                    public CapabilityDefinition definition() {
+                        return new CapabilityDefinition("pending", "写入", Map.of(), Map.of(), true, false, false,
+                                Duration.ofSeconds(5), 0, List.of()).terminal();
+                    }
+                    public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                        assertTrue(context.getConversation().getUserInput().contains("只修改备注，不改名称"));
+                        calls.incrementAndGet(); return CapabilityResult.success("done");
+                    }
+                }).registerIntentAnalyzer((conversation, catalog) -> {
+                    fail("已处理的补充输入不得在恢复时重复分类"); return null;
+                });
+        var steering = new com.github.agentdock.core.steering.ExecutionSteering();
+        steering.offer(new com.github.agentdock.core.steering.SteeringInput("steer-1", "只修改备注，不改名称", 1, Map.of()));
+        ConversationResult result = kernel.execute(new ConversationContext("session", "run-steer", "user",
+                "原始目标", List.of(), Map.of()), steering);
+        assertEquals(IntentStatus.SUCCESS, result.getStatus());
+        assertEquals(1, calls.get());
+    }
+
     @Test
     void resumedExecutionSkipsCompletedCapability() {
         AtomicInteger analyzed = new AtomicInteger();

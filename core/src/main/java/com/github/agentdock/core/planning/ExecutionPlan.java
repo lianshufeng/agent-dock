@@ -16,6 +16,8 @@ public final class ExecutionPlan {
     private LinkedHashMap<String, PlanNode> nodes = new LinkedHashMap<>();
     private List<DeferredBranch> deferredBranches = new ArrayList<>();
     private Map<String, String> requestTimeAnchor = Map.of();
+    /** 已处理的补充输入身份，随计划原子保存，恢复重投不得重复应用。 */
+    private Set<String> handledSteeringInputIds = new LinkedHashSet<>();
 
     public static ExecutionPlan from(String executionId, List<IntentCandidate> intents) {
         ExecutionPlan plan = new ExecutionPlan();

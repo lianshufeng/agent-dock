@@ -11,4 +11,6 @@ public final class ExecutionSnapshot {
     private ExecutionPlan plan;
     private List<IntentResult> results = List.of();
     private ConversationResult finalResult;
+    /** 已合并补充约束的执行原文；兼容旧检查点缺省。 */
+    private String executionInput;
 }

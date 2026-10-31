@@ -143,6 +143,7 @@ public class AiExecutionEngine {
         log.info("AI 执行开始 executionId={}, conversationId={}, inputLength={}", conversation.getExecutionId(),
                 conversation.getConversationId(), conversation.getUserInput() == null ? 0 : conversation.getUserInput().length());
         ExecutionSnapshot saved = loadCheckpoint(conversation);
+        if (saved != null && saved.getExecutionInput() != null) conversation.setUserInput(saved.getExecutionInput());
         if (saved != null) {
             var intents = saved.getPlan().orderedIntents();
             boolean structured = intents.stream().anyMatch(item -> item.getRequestedTaskCode() != null);
@@ -229,7 +230,12 @@ public class AiExecutionEngine {
         while (true) {
             SteeringBatch steeringBatch = steering.drain();
             if (!steeringBatch.isEmpty()) {
+                steeringBatch = new SteeringBatch(steeringBatch.inputs().stream()
+                        .filter(input -> !plan.getHandledSteeringInputIds().contains(input.inputId())).toList());
+            }
+            if (!steeringBatch.isEmpty()) {
                 applySteering(steeringBatch, plan, context, results, conversation);
+                steeringBatch.inputs().forEach(input -> plan.getHandledSteeringInputIds().add(input.inputId()));
                 saveCheckpoint(conversation, plan, results, null);
             }
             resolveDeferredBranches(plan, context, results, conversation);
@@ -749,6 +755,7 @@ public class AiExecutionEngine {
         snapshot.setPlan(plan);
         snapshot.setResults(List.copyOf(results));
         snapshot.setFinalResult(finalResult);
+        snapshot.setExecutionInput(conversation.getUserInput());
         try {
             executionCheckpointStore.save(conversation.getConversationId(), conversation.getExecutionId(),
                     checkpointMapper.writeValueAsString(snapshot));
