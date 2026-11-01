@@ -199,10 +199,12 @@ public class IntentFactory {
         if (branch.getChoices().stream().noneMatch(choice -> choice.getId().equals(decision.getSelectedChoiceId())))
             throw new IllegalArgumentException("模型选择了未登记的条件分支");
         IntentAdapterResult selected = new IntentAdapterResult(decision.getCandidates(), ContextRequirement.NONE, null);
-        List<IntentCandidate> intents = normalize(context, selected, Set.of(branch.getTriggerIntentId())).getOrderedIntents();
+        List<IntentCandidate> intents = normalize(context, selected, Set.copyOf(plan.getNodes().keySet())).getOrderedIntents();
         if (intents.isEmpty()) throw new IllegalArgumentException("选中分支没有可执行意图");
         for (IntentCandidate intent : intents) {
-            if (intent.getDependsOn().isEmpty()) intent.setDependsOn(List.of(branch.getTriggerIntentId()));
+            LinkedHashSet<String> dependencies = new LinkedHashSet<>(intent.getDependsOn());
+            dependencies.add(branch.getTriggerIntentId());
+            intent.setDependsOn(List.copyOf(dependencies));
         }
         decision.setCandidates(intents);
         return decision;

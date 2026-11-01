@@ -70,6 +70,61 @@ class DeferredBranchExecutionTest {
         assertEquals(1, result.getIntentResults().size());
     }
 
+    @Test void selectedBranchCanDependOnTriggerAndAnotherCompletedIntent() {
+        Set<String> completed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        List<String> branchDependencies = new ArrayList<>();
+        DeferredBranch branch = new DeferredBranch();
+        branch.setId("combined-result"); branch.setTriggerIntentId("intent_1");
+        DeferredBranch.Choice choice = new DeferredBranch.Choice();
+        choice.setId("report"); choice.setCondition("用户要求合并已完成结果"); choice.setGoal("合并姓名和官网地址");
+        branch.setChoices(List.of(choice));
+        AiKernel kernel = new AiKernel().registerIntent(new IntentDefinition("TASK", "执行目标"))
+                .registerIntentAnalyzer(new LlmIntentAnalyzer() {
+                    @Override public IntentAdapterResult analyze(ConversationContext context, String catalog) {
+                        IntentAdapterResult result = new IntentAdapterResult(List.of(
+                                intent("intent_1", "保存姓名", List.of()),
+                                intent("intent_2", "查询官网", List.of())), ContextRequirement.NONE, null);
+                        result.setDeferredBranches(List.of(branch));
+                        return result;
+                    }
+                    @Override public DeferredBranchDecision resolveDeferredBranch(ConversationContext context,
+                            String catalog, ContextSnapshot snapshot, DeferredBranch pending, IntentResult triggerResult) {
+                        DeferredBranchDecision decision = new DeferredBranchDecision();
+                        decision.setSelectedChoiceId("report"); decision.setReason("两项前置工作均已完成");
+                        decision.setCandidates(List.of(intent("final", "合并姓名和官网地址", List.of("intent_2"))));
+                        return decision;
+                    }
+                })
+                .registerCapability(new AiCapability() {
+                    @Override public CapabilityDefinition definition() {
+                        return new CapabilityDefinition("MOCK", "执行验收步骤", Map.of(), Map.of(), false,
+                                true, false, Duration.ofSeconds(5), 0, List.of()).terminal();
+                    }
+                    @Override public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                        if ("合并姓名和官网地址".equals(intent.getDescription())) {
+                            branchDependencies.addAll(intent.getDependsOn());
+                            assertTrue(completed.containsAll(Set.of("保存姓名", "查询官网")));
+                        }
+                        completed.add(intent.getDescription());
+                        return CapabilityResult.success(intent.getDescription());
+                    }
+                })
+                .registerIntentLoopPlanner(request -> {
+                    IntentLoopDecision decision = new IntentLoopDecision();
+                    decision.setStatus(IntentLoopDecision.Status.CONTINUE);
+                    decision.setToolInvocations(List.of(new CapabilityInvocation("MOCK", Map.of())));
+                    decision.setCompleteAfterTools(true);
+                    return decision;
+                });
+
+        ConversationResult result = kernel.execute(new ConversationContext("sample", UUID.randomUUID().toString(),
+                "user", "保存姓名、查询官网，最后合并结果", List.of(), Map.of()));
+
+        assertEquals(IntentStatus.SUCCESS, result.getStatus(), result.getMessage());
+        assertEquals(Set.of("intent_1", "intent_2"), Set.copyOf(branchDependencies));
+        assertEquals(Set.of("保存姓名", "查询官网", "合并姓名和官网地址"), completed);
+    }
+
     @Test void timeAnchorUsesUserLocalDate() {
         Map<String, String> anchor = com.github.agentdock.core.context.RequestTimeAnchor.from(Map.of(
                 "runtimeEnvironment", Map.of("requestTimeUtc", "2026-09-25T16:10:00Z",
