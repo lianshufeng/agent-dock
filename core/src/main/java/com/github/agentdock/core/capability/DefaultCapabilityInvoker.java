@@ -121,6 +121,21 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 result = validateOutput(fallback.definition(), result);
                 result = classifyUnknownOutcome(fallback.definition(), result);
                 actualCapabilityCode = fallbackCode;
+                if (result.isOutcomeUnknown() && fallbackDefinition.isSideEffect()
+                        && fallback.supportsUnknownOutcomeRecovery()) {
+                    CapabilityResult recovered = recoverUnknownOnce(fallback, intent, context, fallbackInvocation,
+                            result, fallbackDefinition.getTimeout());
+                    recoveries++;
+                    if (recovered != null && recovered.isSuccess()) {
+                        CapabilityResult validatedRecovery = validateOutput(fallbackDefinition, recovered);
+                        result = validatedRecovery != null && validatedRecovery.isSuccess()
+                                ? validatedRecovery
+                                : CapabilityResult.unknown("替代能力的未知写入核实结果不符合输出契约，仍需人工核实");
+                    } else {
+                        String detail = recovered == null ? "核实能力未返回结果" : recovered.getMessage();
+                        result = CapabilityResult.unknown("替代能力写入结果仍未确认，请先核实实际数据，禁止重复提交：" + detail);
+                    }
+                }
                 if (result.isSuccess() || result.isOutcomeUnknown() || recoveries >= remainingRecoveries) break;
             }
         }

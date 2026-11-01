@@ -174,4 +174,44 @@ class UnknownOutcomeTest {
         assertTrue(call.result().isOutcomeUnknown());
         assertEquals(1, call.recoveryAttempts());
     }
+
+    @Test void fallbackUnknownOutcomeCanUseItsOwnRecoveryHook() {
+        AtomicInteger fallbackCalls = new AtomicInteger();
+        AtomicInteger verifications = new AtomicInteger();
+        CapabilityRegistry registry = new CapabilityRegistry();
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("primary-failure", "主能力失败", Map.of(), Map.of(),
+                        false, true, false, Duration.ofSeconds(1), 0, List.of("fallback-write"));
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                return CapabilityResult.failure("PRIMARY_FAILED", "主能力失败", false);
+            }
+        });
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("fallback-write", "替代写入", Map.of(),
+                        Map.of("verified", "boolean"), true, true, false, Duration.ofSeconds(1), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                fallbackCalls.incrementAndGet();
+                return CapabilityResult.unknown("替代写入回执丢失");
+            }
+            public boolean supportsUnknownOutcomeRecovery() { return true; }
+            public CapabilityResult recoverUnknownOutcome(IntentCandidate intent, AiExecutionContext context,
+                    CapabilityInvocation invocation, CapabilityResult previousUnknown) {
+                verifications.incrementAndGet();
+                return CapabilityResult.success(Map.of("verified", true));
+            }
+        });
+
+        CapabilityCallResult call = new DefaultCapabilityInvoker(registry).invoke(new IntentCandidate(),
+                new AiExecutionContext(), new CapabilityInvocation("primary-failure", Map.of()), 2);
+
+        assertTrue(call.result().isSuccess(), call.result().toString());
+        assertEquals("fallback-write", call.actualCapabilityCode());
+        assertEquals(1, fallbackCalls.get());
+        assertEquals(1, verifications.get());
+        assertEquals(2, call.recoveryAttempts());
+    }
 }
