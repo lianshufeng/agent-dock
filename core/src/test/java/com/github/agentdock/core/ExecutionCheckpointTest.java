@@ -149,6 +149,10 @@ class ExecutionCheckpointTest {
         store.value = mapper.writeValueAsString(malformed);
         assertThrows(IllegalArgumentException.class,
                 () -> kernel.validateExecutionResume("session", "malformed-run"));
+
+        store.value = "null";
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "null-run"));
     }
 
     @Test

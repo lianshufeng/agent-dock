@@ -150,6 +150,7 @@ public final class AiKernel {
         } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
             throw new IllegalArgumentException("执行检查点无法解析，拒绝恢复", exception);
         }
+        if (snapshot == null) throw new IllegalArgumentException("执行检查点内容为空，拒绝恢复");
         var plan = snapshot.getPlan();
         if (plan == null) throw new IllegalArgumentException("执行检查点缺少计划，拒绝恢复");
         if (plan.getNodes() == null || plan.getNodes().isEmpty())
