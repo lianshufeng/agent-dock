@@ -135,6 +135,34 @@ public final class AiKernel {
         return this;
     }
 
+    /** 验证检查点只包含可安全继续的待执行节点；不重放状态不确定或已有终态结果的任务。 */
+    public void validateExecutionResume(String conversationId, String executionId) {
+        if (conversationId == null || conversationId.isBlank() || executionId == null || executionId.isBlank())
+            throw new IllegalArgumentException("恢复执行缺少会话或执行标识");
+        if (executionCheckpointStore == null)
+            throw new IllegalArgumentException("当前内核未注册执行检查点存储");
+        String value = executionCheckpointStore.load(conversationId, executionId)
+                .orElseThrow(() -> new IllegalArgumentException("执行没有可用检查点，拒绝猜测恢复"));
+        com.github.agentdock.core.planning.ExecutionSnapshot snapshot;
+        try {
+            snapshot = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules()
+                    .readValue(value, com.github.agentdock.core.planning.ExecutionSnapshot.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalArgumentException("执行检查点无法解析，拒绝恢复", exception);
+        }
+        var plan = snapshot.getPlan();
+        if (plan == null) throw new IllegalArgumentException("执行检查点缺少计划，拒绝恢复");
+        if (plan.getNodes() == null || plan.getNodes().isEmpty())
+            throw new IllegalArgumentException("执行检查点缺少可恢复节点，拒绝恢复");
+        if (snapshot.getFinalResult() != null)
+            throw new IllegalArgumentException("执行检查点已有终态结果，拒绝重复执行");
+        boolean safeStatuses = plan.getNodes().values().stream().allMatch(node ->
+                node != null && (node.getStatus() == com.github.agentdock.core.planning.PlanNodeStatus.PENDING
+                        || node.getStatus() == com.github.agentdock.core.planning.PlanNodeStatus.SUCCESS));
+        if (!safeStatuses || plan.readyNodes().isEmpty())
+            throw new IllegalArgumentException("检查点包含状态不确定或不可继续的节点，拒绝自动重放");
+    }
+
     /** 会话记忆由宿主存储；未注册时不进行任何记忆查询。 */
     public AiKernel registerSessionMemoryStore(SessionMemoryStore store) {
         this.sessionMemoryStore = java.util.Objects.requireNonNull(store, "会话记忆存储不能为空");

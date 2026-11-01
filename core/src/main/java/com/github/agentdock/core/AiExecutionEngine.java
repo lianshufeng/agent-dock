@@ -256,6 +256,7 @@ public class AiExecutionEngine {
                 continue;
             }
             Map<String, CompletableFuture<IntentResult>> running = new LinkedHashMap<>();
+            List<IntentResult> dispatchFailures = new ArrayList<>();
             for (PlanNode node : readyNodes) {
                 node.setStatus(PlanNodeStatus.RUNNING);
             }
@@ -268,10 +269,9 @@ public class AiExecutionEngine {
                             executeIntent(intent, plan.orderedIntents().size(), context, results.size(),
                                     scopedBranchInput(plan, intent)), DAG_EXECUTOR));
                 } catch (RejectedExecutionException exception) {
-                    IntentResult rejected = IntentResult.failed(intent, "AI 执行资源已满，请稍后重试");
-                    context.addResult(rejected);
-                    replaceResult(results, rejected);
-                    node.setStatus(PlanNodeStatus.FAILED);
+                    // 提交被拒绝表示任务从未开始，保留为 PENDING 才能安全地显式恢复。
+                    node.setStatus(PlanNodeStatus.PENDING);
+                    dispatchFailures.add(IntentResult.failed(intent, "AI 执行资源已满，请稍后重试"));
                 }
             }
             saveCheckpoint(conversation, plan, results, null);
@@ -292,6 +292,16 @@ public class AiExecutionEngine {
                     saveCheckpoint(conversation, plan, results, null);
                 }
             });
+            if (!dispatchFailures.isEmpty()) {
+                saveCheckpoint(conversation, plan, results, null);
+                List<IntentResult> partialResults = new ArrayList<>(results);
+                partialResults.addAll(dispatchFailures);
+                String message = "AI 执行资源已满，请稍后重试";
+                ConversationResult rejected = new ConversationResult(IntentStatus.FAILED, partialResults, message);
+                publish(conversation, null, AiEventType.FINAL_RESULT, message, 100);
+                appendAssistant(conversation, message);
+                return rejected;
+            }
         }
         results.sort(java.util.Comparator.comparingInt(result -> plan.orderedIntents().stream()
                 .map(IntentCandidate::getId).toList().indexOf(result.getIntentId())));

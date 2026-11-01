@@ -10,6 +10,9 @@ import com.github.agentdock.core.type.IntentComplexity;
 import com.github.agentdock.core.type.IntentStatus;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -91,6 +94,62 @@ class ExecutionCheckpointTest {
 
         assertEquals(IntentStatus.WAITING_USER, result.getStatus());
         assertEquals(0, calls.get());
+    }
+
+    @Test
+    void rejectedDagSubmissionKeepsNodePendingForExplicitRetry() throws Exception {
+        var field = AiExecutionEngine.class.getDeclaredField("DAG_EXECUTOR");
+        field.setAccessible(true);
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) field.get(null);
+        int workers = executor.getMaximumPoolSize();
+        int queuedTasks = executor.getQueue().remainingCapacity();
+        CountDownLatch started = new CountDownLatch(workers);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(workers + queuedTasks);
+        AtomicInteger analyzed = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        InterruptOnceStore store = new InterruptOnceStore();
+        store.interrupted = true;
+        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store)
+                .registerIntent(new IntentDefinition("ACTION", "执行动作"))
+                .registerIntentAnalyzer((LlmIntentAnalyzer) (conversation, catalog) -> {
+                    analyzed.incrementAndGet();
+                    return new IntentAdapterResult(List.of(intent("pending", List.of())),
+                            ContextRequirement.NONE, null);
+                })
+                .registerCapability(capability("pending", calls));
+        ConversationContext input = new ConversationContext("session", "rejected-run", "user",
+                "执行动作", List.of(), Map.of());
+        Runnable blocker = () -> {
+            started.countDown();
+            try { release.await(); }
+            catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+            finally { finished.countDown(); }
+        };
+        try {
+            for (int index = 0; index < workers; index++) executor.execute(blocker);
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            for (int index = 0; index < queuedTasks; index++) executor.execute(blocker);
+            assertEquals(0, executor.getQueue().remainingCapacity());
+
+            ConversationResult rejected = kernel.execute(input);
+            assertEquals(IntentStatus.FAILED, rejected.getStatus());
+            assertEquals(0, calls.get());
+            ExecutionSnapshot saved = new ObjectMapper().readValue(store.value, ExecutionSnapshot.class);
+            assertNull(saved.getFinalResult());
+            assertEquals(PlanNodeStatus.PENDING, saved.getPlan().getNodes().get("pending").getStatus());
+            assertDoesNotThrow(() -> kernel.validateExecutionResume("session", "rejected-run"));
+        } finally {
+            release.countDown();
+            assertTrue(finished.await(10, TimeUnit.SECONDS));
+        }
+
+        ConversationResult retried = kernel.execute(input);
+        assertEquals(IntentStatus.SUCCESS, retried.getStatus());
+        assertEquals(1, analyzed.get());
+        assertEquals(1, calls.get());
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "rejected-run"));
     }
 
     private IntentCandidate intent(String id, List<String> dependencies) {
