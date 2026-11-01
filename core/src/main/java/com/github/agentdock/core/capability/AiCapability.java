@@ -18,4 +18,21 @@ public interface AiCapability {
                                         CapabilityInvocation invocation, CapabilityResult failedResult) {
         return CapabilityResult.failure("COMPENSATION_NOT_IMPLEMENTED", "能力未实现补偿操作", false);
     }
+
+    /**
+     * 是否支持核实未知的副作用结果。默认关闭；宿主只能在具备权威读回或稳定幂等键时启用。
+     */
+    default boolean supportsUnknownOutcomeRecovery() {
+        return false;
+    }
+
+    /**
+     * 核实或按同一稳定幂等键安全重放一次未知结果。只有返回成功且输出通过契约校验，内核才会确认成功；
+     * 返回失败、未知或发生异常都仍按未知结果处理。该方法在副作用串行执行器中运行。
+     */
+    default CapabilityResult recoverUnknownOutcome(IntentCandidate intent, AiExecutionContext context,
+                                                   CapabilityInvocation invocation,
+                                                   CapabilityResult previousUnknown) {
+        return CapabilityResult.unknown("该能力未实现未知写入结果核实");
+    }
 }

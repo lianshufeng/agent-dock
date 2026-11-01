@@ -117,4 +117,61 @@ class UnknownOutcomeTest {
         assertEquals(0, fallback.get());
         assertEquals(0, call.recoveryAttempts());
     }
+
+    @Test void optedInCapabilityCanConfirmUnknownOutcomeWithoutRepeatingInitialCall() {
+        AtomicInteger writes = new AtomicInteger();
+        AtomicInteger verifications = new AtomicInteger();
+        CapabilityInvocation invocation = new CapabilityInvocation("recoverable-write", Map.of("operationId", "op-1"));
+        CapabilityRegistry registry = new CapabilityRegistry();
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("recoverable-write", "带幂等核实的写操作", Map.of("operationId", "string"),
+                        Map.of("verified", "boolean"), true, true, false, Duration.ofSeconds(1), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                writes.incrementAndGet();
+                return CapabilityResult.unknown("写入回执丢失");
+            }
+            public boolean supportsUnknownOutcomeRecovery() { return true; }
+            public CapabilityResult recoverUnknownOutcome(IntentCandidate intent, AiExecutionContext context,
+                    CapabilityInvocation receivedInvocation, CapabilityResult previousUnknown) {
+                verifications.incrementAndGet();
+                assertSame(invocation, receivedInvocation);
+                assertTrue(previousUnknown.isOutcomeUnknown());
+                return CapabilityResult.success(Map.of("verified", true));
+            }
+        });
+
+        CapabilityCallResult call = new DefaultCapabilityInvoker(registry).invoke(new IntentCandidate(),
+                new AiExecutionContext(), invocation, 0);
+
+        assertTrue(call.result().isSuccess(), call.result().toString());
+        assertEquals(1, writes.get());
+        assertEquals(1, verifications.get());
+        assertEquals(1, call.recoveryAttempts());
+    }
+
+    @Test void invalidUnknownOutcomeRecoveryRemainsUnknown() {
+        CapabilityRegistry registry = new CapabilityRegistry();
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("invalid-recovery", "输出错误的核实操作", Map.of(),
+                        Map.of("verified", "boolean"), true, true, false, Duration.ofSeconds(1), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                return CapabilityResult.unknown("写入回执丢失");
+            }
+            public boolean supportsUnknownOutcomeRecovery() { return true; }
+            public CapabilityResult recoverUnknownOutcome(IntentCandidate intent, AiExecutionContext context,
+                    CapabilityInvocation invocation, CapabilityResult previousUnknown) {
+                return CapabilityResult.success(Map.of("verified", "yes"));
+            }
+        });
+
+        CapabilityCallResult call = new DefaultCapabilityInvoker(registry).invoke(new IntentCandidate(),
+                new AiExecutionContext(), new CapabilityInvocation("invalid-recovery", Map.of()), 0);
+
+        assertTrue(call.result().isOutcomeUnknown());
+        assertEquals(1, call.recoveryAttempts());
+    }
 }

@@ -79,6 +79,21 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
             recoveries++;
         } while (true);
 
+        if (result.isOutcomeUnknown() && definition.isSideEffect() && capability.supportsUnknownOutcomeRecovery()) {
+            CapabilityResult recovered = recoverUnknownOnce(capability, intent, context, invocation, result,
+                    definition.getTimeout());
+            recoveries++;
+            if (recovered != null && recovered.isSuccess()) {
+                CapabilityResult validatedRecovery = validateOutput(definition, recovered);
+                result = validatedRecovery != null && validatedRecovery.isSuccess()
+                        ? validatedRecovery
+                        : CapabilityResult.unknown("未知写入的核实结果不符合能力输出契约，仍需人工核实");
+            } else {
+                String detail = recovered == null ? "核实能力未返回结果" : recovered.getMessage();
+                result = CapabilityResult.unknown("写入结果仍未确认，请先核实实际数据，禁止重复提交：" + detail);
+            }
+        }
+
         if (!result.isSuccess() && !result.isOutcomeUnknown() && definition.isSideEffect() && definition.isCompensatable()
                 && recoveries < remainingRecoveries) {
             recoveries++;
@@ -123,6 +138,18 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                         "COMPENSATION_TIMEOUT", "能力补偿超时", false,
                         "COMPENSATION_INTERRUPTED", "能力补偿被中断",
                         "COMPENSATION_EXCEPTION", false));
+    }
+
+    private CapabilityResult recoverUnknownOnce(AiCapability capability, IntentCandidate intent,
+                                                AiExecutionContext context, CapabilityInvocation invocation,
+                                                CapabilityResult previousUnknown, Duration timeout) {
+        return CapabilityExecutionSupport.execute(SIDE_EFFECT_EXECUTOR,
+                () -> capability.recoverUnknownOutcome(intent, context, invocation, previousUnknown), timeout,
+                new CapabilityExecutionSupport.FailureMessages(
+                        "UNKNOWN_RECOVERY_EMPTY_RESULT", "未知结果核实未返回结果",
+                        "UNKNOWN_RECOVERY_TIMEOUT", "未知结果核实超时", false,
+                        "UNKNOWN_RECOVERY_INTERRUPTED", "未知结果核实被中断",
+                        "UNKNOWN_RECOVERY_EXCEPTION", false));
     }
 
     private CapabilityResult invokeOnce(AiCapability capability, IntentCandidate intent,
