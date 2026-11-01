@@ -49,14 +49,13 @@ public final class RegistryTaskPlanner implements TaskPlanner {
                 throw new IllegalArgumentException("任务规划器选择了未注册或不适用的任务: " + task.getDefinitionCode());
         } else {
             if (customPlanner || candidates.isEmpty()) return task;
-            if (candidates.size() == 1) definition = candidates.get(0);
-            else {
-                if (selector == null) return task;
+            if (selector != null) {
                 String code = selector.select(intent, context, java.util.List.copyOf(candidates));
                 if (code == null || code.isBlank()) return task;
                 definition = candidates.stream().filter(item -> code.equals(item.getCode())).findFirst()
                         .orElseThrow(() -> new IllegalArgumentException("任务选择器返回了候选范围外的任务: " + code));
-            }
+            } else if (candidates.size() == 1) definition = candidates.get(0);
+            else return task;
         }
         task.setDefinitionCode(definition.getCode());
         if (intent.getRequestedTaskCode() != null && !intent.getRequestedTaskCode().isBlank()) {

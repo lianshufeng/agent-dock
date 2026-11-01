@@ -80,4 +80,19 @@ class TaskRegistryTest {
         assertThrows(IllegalArgumentException.class, () -> new RegistryTaskPlanner(registry, null,
                 (candidate, context, definitions) -> "unknown").plan(intent, null));
     }
+
+    @Test
+    void selectorCanLeaveASingleRegisteredTaskToTheLegacyPlanner() {
+        TaskRegistry registry = new TaskRegistry();
+        registry.register(new TaskDefinition("single.task", "执行单一目标",
+                Set.of("GOAL"), List.of("single.capability"), "目标已完成"));
+        IntentCandidate intent = new IntentCandidate();
+        intent.setId("intent-4"); intent.setCode("GOAL"); intent.setDescription("执行目标");
+
+        Task task = new RegistryTaskPlanner(registry, null, (candidate, context, definitions) -> null)
+                .plan(intent, null);
+
+        assertNull(task.getDefinitionCode());
+        assertTrue(task.getAllowedCapabilityCodes().isEmpty());
+    }
 }
