@@ -5,8 +5,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,6 +45,52 @@ class CapabilityExecutionSupportTest {
         assertEquals("EMPTY_RESULT", result.getErrorCode());
         assertEquals("能力未返回结果", result.getMessage());
         assertFalse(result.isRetryable());
+    }
+
+    @Test
+    void convertsRejectedExecutorWithoutStartingCapability() {
+        ExecutorService rejected = Executors.newSingleThreadExecutor();
+        rejected.shutdownNow();
+
+        CapabilityResult result = CapabilityExecutionSupport.execute(rejected,
+                () -> CapabilityResult.success("不应执行"), Duration.ofSeconds(1), capabilityMessages());
+
+        assertFalse(result.isSuccess());
+        assertEquals("CAPABILITY_EXECUTOR_REJECTED", result.getErrorCode());
+    }
+
+    @Test
+    void queuedTimeoutDoesNotStartCapabilityOrReportUnknownExecution() throws Exception {
+        ExecutorService serial = Executors.newSingleThreadExecutor();
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1);
+        AtomicInteger secondCalls = new AtomicInteger();
+        try {
+            Future<CapabilityResult> first = caller.submit(() -> CapabilityExecutionSupport.execute(serial, () -> {
+                firstStarted.countDown();
+                while (firstRelease.getCount() > 0) {
+                    try { firstRelease.await(); } catch (InterruptedException ignored) { }
+                }
+                return CapabilityResult.success("首个能力完成");
+            }, Duration.ofSeconds(2), capabilityMessages()));
+            assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+
+            CapabilityResult queued = CapabilityExecutionSupport.execute(serial, () -> {
+                secondCalls.incrementAndGet();
+                return CapabilityResult.success("不应执行");
+            }, Duration.ofMillis(50), capabilityMessages());
+
+            assertEquals("CAPABILITY_EXECUTOR_QUEUE_TIMEOUT", queued.getErrorCode());
+            assertFalse(queued.isOutcomeUnknown());
+            assertEquals(0, secondCalls.get());
+            firstRelease.countDown();
+            assertTrue(first.get(1, TimeUnit.SECONDS).isSuccess());
+        } finally {
+            firstRelease.countDown();
+            caller.shutdownNow();
+            serial.shutdownNow();
+        }
     }
 
     @Test

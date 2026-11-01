@@ -6,9 +6,78 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 class UnknownOutcomeTest {
+    @Test void timedOutSideEffectKeepsLaterWritesSerializedUntilWorkerExits() throws Exception {
+        AtomicInteger activeWrites = new AtomicInteger();
+        AtomicInteger maximumConcurrentWrites = new AtomicInteger();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1);
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch firstExited = new CountDownLatch(1);
+        CapabilityRegistry registry = new CapabilityRegistry();
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("slow-write", "可忽略中断的写操作", Map.of(), Map.of(),
+                        true, true, false, Duration.ofMillis(80), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                int active = activeWrites.incrementAndGet();
+                maximumConcurrentWrites.accumulateAndGet(active, Math::max);
+                firstStarted.countDown();
+                try {
+                    while (firstRelease.getCount() > 0) {
+                        try { firstRelease.await(); } catch (InterruptedException ignored) { }
+                    }
+                    return CapabilityResult.success("首个写入完成");
+                } finally {
+                    activeWrites.decrementAndGet();
+                    firstExited.countDown();
+                }
+            }
+        });
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("next-write", "后续写操作", Map.of(), Map.of(),
+                        true, true, false, Duration.ofSeconds(3), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                int active = activeWrites.incrementAndGet();
+                maximumConcurrentWrites.accumulateAndGet(active, Math::max);
+                secondStarted.countDown();
+                try { return CapabilityResult.success("后续写入完成"); }
+                finally { activeWrites.decrementAndGet(); }
+            }
+        });
+        DefaultCapabilityInvoker invoker = new DefaultCapabilityInvoker(registry);
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try {
+            CapabilityCallResult first = invoker.invoke(new IntentCandidate(), new AiExecutionContext(),
+                    new CapabilityInvocation("slow-write", Map.of()), 0);
+            assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(first.result().isOutcomeUnknown());
+
+            Future<CapabilityCallResult> next = caller.submit(() -> invoker.invoke(new IntentCandidate(),
+                    new AiExecutionContext(), new CapabilityInvocation("next-write", Map.of()), 0));
+            assertFalse(secondStarted.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(1, activeWrites.get());
+
+            firstRelease.countDown();
+            assertTrue(firstExited.await(1, TimeUnit.SECONDS));
+            assertTrue(next.get(3, TimeUnit.SECONDS).result().isSuccess());
+            assertEquals(1, maximumConcurrentWrites.get());
+        } finally {
+            firstRelease.countDown();
+            caller.shutdownNow();
+        }
+    }
+
     @Test void sideEffectTimeoutDoesNotRetryCompensateOrFallback() {
         AtomicInteger mutations = new AtomicInteger();
         AtomicInteger compensation = new AtomicInteger();

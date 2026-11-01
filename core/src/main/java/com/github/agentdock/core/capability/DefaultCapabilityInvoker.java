@@ -10,11 +10,13 @@ import java.util.concurrent.*;
 
 /** 基于 JDK 的默认调用器；宿主可以注册其他线程模型的实现。 */
 public final class DefaultCapabilityInvoker implements CapabilityInvoker {
-    /** 能力未提供资源键前，对副作用调用保守互斥；只读能力仍可并行。 */
-    private static final java.util.concurrent.locks.ReentrantLock SIDE_EFFECT_LOCK =
-            new java.util.concurrent.locks.ReentrantLock(true);
     private static final int CPU_COUNT = Math.max(1, Runtime.getRuntime().availableProcessors());
     private static final int CAPABILITY_PARALLELISM = Math.max(1, CPU_COUNT / 4);
+    /** 串行化副作用工具。工作线程持有调用直到真实退出，调用方超时不会释放写入互斥边界。 */
+    private static final ExecutorService SIDE_EFFECT_EXECUTOR = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(128),
+            ExecutorSupport.daemonThreadFactory("ai-side-effect-invoker"),
+            new ThreadPoolExecutor.AbortPolicy());
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(
             CAPABILITY_PARALLELISM, CAPABILITY_PARALLELISM, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(Math.max(8, CAPABILITY_PARALLELISM * 4)),
@@ -23,10 +25,12 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
 
     public void shutdown() {
         EXECUTOR.shutdownNow();
+        SIDE_EFFECT_EXECUTOR.shutdownNow();
     }
 
     public static void shutdownExecutor() {
         EXECUTOR.shutdownNow();
+        SIDE_EFFECT_EXECUTOR.shutdownNow();
     }
 
     private final CapabilityRegistry registry;
@@ -61,10 +65,6 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         String validationMessage = invocationValidator.validate(definition, invocation.getArguments());
         if (validationMessage != null) return failure("INVALID_ARGUMENTS", validationMessage, 0,
                 invocation.getCapabilityCode(), startedAt);
-        boolean locked = definition.isSideEffect();
-        if (locked) SIDE_EFFECT_LOCK.lock();
-        try {
-
         int recoveries = 0;
         boolean compensationAttempted = false;
         String actualCapabilityCode = invocation.getCapabilityCode();
@@ -72,7 +72,7 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         CapabilityResult result;
         do {
             context.setCurrentCapabilityInvocation(invocation);
-            result = invokeOnce(capability, intent, context, definition.getTimeout());
+            result = invokeOnce(capability, intent, context, definition.getTimeout(), definition.isSideEffect());
             result = validateOutput(definition, result);
             result = classifyUnknownOutcome(definition, result);
             if (result.isSuccess() || result.isOutcomeUnknown() || !result.isRetryable() || recoveries >= retries) break;
@@ -100,7 +100,9 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 recoveries++;
                 CapabilityInvocation fallbackInvocation = new CapabilityInvocation(fallbackCode, invocation.getArguments());
                 context.setCurrentCapabilityInvocation(fallbackInvocation);
-                result = invokeOnce(fallback, intent, context, fallback.definition().getTimeout());
+                CapabilityDefinition fallbackDefinition = fallback.definition();
+                result = invokeOnce(fallback, intent, context, fallbackDefinition.getTimeout(),
+                        fallbackDefinition.isSideEffect());
                 result = validateOutput(fallback.definition(), result);
                 result = classifyUnknownOutcome(fallback.definition(), result);
                 actualCapabilityCode = fallbackCode;
@@ -109,15 +111,12 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         }
         return new CapabilityCallResult(result, recoveries, actualCapabilityCode, compensationAttempted,
                 elapsedMillis(startedAt));
-        } finally {
-            if (locked) SIDE_EFFECT_LOCK.unlock();
-        }
     }
 
     private CapabilityResult compensateOnce(AiCapability capability, IntentCandidate intent,
                                             AiExecutionContext context, CapabilityInvocation invocation,
                                             CapabilityResult failedResult, Duration timeout) {
-        return CapabilityExecutionSupport.execute(EXECUTOR,
+        return CapabilityExecutionSupport.execute(SIDE_EFFECT_EXECUTOR,
                 () -> capability.compensate(intent, context, invocation, failedResult), timeout,
                 new CapabilityExecutionSupport.FailureMessages(
                         "EMPTY_COMPENSATION_RESULT", "补偿未返回结果",
@@ -127,8 +126,8 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
     }
 
     private CapabilityResult invokeOnce(AiCapability capability, IntentCandidate intent,
-                                        AiExecutionContext context, Duration timeout) {
-        return CapabilityExecutionSupport.execute(EXECUTOR,
+                                        AiExecutionContext context, Duration timeout, boolean sideEffect) {
+        return CapabilityExecutionSupport.execute(sideEffect ? SIDE_EFFECT_EXECUTOR : EXECUTOR,
                 () -> capability.invoke(intent, context), timeout,
                 new CapabilityExecutionSupport.FailureMessages(
                         "EMPTY_RESULT", "能力未返回结果",
