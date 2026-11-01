@@ -77,6 +77,81 @@ class ExecutionCheckpointTest {
     }
 
     @Test
+    void completedCheckpointCanBeFinalizedWithoutReplayingCapability() throws Exception {
+        InterruptOnceStore store = new InterruptOnceStore();
+        store.interrupted = true;
+        IntentCandidate completed = intent("completed", List.of());
+        ExecutionPlan plan = ExecutionPlan.from("finalize-run", List.of(completed));
+        plan.getNodes().get("completed").setStatus(PlanNodeStatus.SUCCESS);
+        ExecutionSnapshot snapshot = new ExecutionSnapshot();
+        snapshot.setPlan(plan);
+        snapshot.setResults(List.of(IntentResult.success(completed, Map.of("value", "already-done"))));
+        store.value = new ObjectMapper().writeValueAsString(snapshot);
+
+        AtomicInteger calls = new AtomicInteger();
+        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store)
+                .registerCapability(capability("completed", calls))
+                .registerIntentAnalyzer((conversation, catalog) -> {
+                    fail("已有检查点不应重新分析意图");
+                    return null;
+                });
+
+        assertDoesNotThrow(() -> kernel.validateExecutionResume("session", "finalize-run"));
+        ConversationResult result = kernel.execute(new ConversationContext("session", "finalize-run", "user",
+                "完成后的请求", List.of(), Map.of()));
+
+        assertEquals(IntentStatus.SUCCESS, result.getStatus());
+        assertEquals(0, calls.get());
+        ExecutionSnapshot finalized = new ObjectMapper().readValue(store.value, ExecutionSnapshot.class);
+        assertNotNull(finalized.getFinalResult());
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "finalize-run"));
+    }
+
+    @Test
+    void resumeRejectsUncertainOrIncompleteCheckpoints() throws Exception {
+        InterruptOnceStore store = new InterruptOnceStore();
+        AiKernel kernel = new AiKernel().registerExecutionCheckpointStore(store);
+        ObjectMapper mapper = new ObjectMapper();
+        for (PlanNodeStatus status : List.of(PlanNodeStatus.RUNNING, PlanNodeStatus.FAILED,
+                PlanNodeStatus.WAITING_USER, PlanNodeStatus.SKIPPED, PlanNodeStatus.CANCELLED)) {
+            ExecutionPlan plan = ExecutionPlan.from("unsafe-run", List.of(intent("node", List.of())));
+            plan.getNodes().get("node").setStatus(status);
+            ExecutionSnapshot snapshot = new ExecutionSnapshot();
+            snapshot.setPlan(plan);
+            store.value = mapper.writeValueAsString(snapshot);
+            assertThrows(IllegalArgumentException.class,
+                    () -> kernel.validateExecutionResume("session", "unsafe-run"), status.name());
+        }
+
+        IntentCandidate completed = intent("completed", List.of());
+        ExecutionPlan incompletePlan = ExecutionPlan.from("incomplete-run", List.of(completed));
+        incompletePlan.getNodes().get("completed").setStatus(PlanNodeStatus.SUCCESS);
+        ExecutionSnapshot incomplete = new ExecutionSnapshot();
+        incomplete.setPlan(incompletePlan);
+        incomplete.setResults(List.of());
+        store.value = mapper.writeValueAsString(incomplete);
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "incomplete-run"));
+
+        ExecutionPlan blockedPlan = ExecutionPlan.from("blocked-run", List.of(
+                intent("first", List.of("second")), intent("second", List.of("first"))));
+        ExecutionSnapshot blocked = new ExecutionSnapshot();
+        blocked.setPlan(blockedPlan);
+        store.value = mapper.writeValueAsString(blocked);
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "blocked-run"));
+
+        ExecutionPlan malformedPlan = ExecutionPlan.from("malformed-run", List.of());
+        malformedPlan.getNodes().put("null", null);
+        ExecutionSnapshot malformed = new ExecutionSnapshot();
+        malformed.setPlan(malformedPlan);
+        store.value = mapper.writeValueAsString(malformed);
+        assertThrows(IllegalArgumentException.class,
+                () -> kernel.validateExecutionResume("session", "malformed-run"));
+    }
+
+    @Test
     void interruptedRunningNodeIsNotReplayed() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         InterruptOnceStore store = new InterruptOnceStore();

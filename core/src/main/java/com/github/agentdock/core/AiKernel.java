@@ -135,7 +135,7 @@ public final class AiKernel {
         return this;
     }
 
-    /** 验证检查点只包含可安全继续的待执行节点；不重放状态不确定或已有终态结果的任务。 */
+    /** 验证检查点仅包含可安全继续的待执行节点，或已成功但尚未聚合的节点。 */
     public void validateExecutionResume(String conversationId, String executionId) {
         if (conversationId == null || conversationId.isBlank() || executionId == null || executionId.isBlank())
             throw new IllegalArgumentException("恢复执行缺少会话或执行标识");
@@ -159,8 +159,20 @@ public final class AiKernel {
         boolean safeStatuses = plan.getNodes().values().stream().allMatch(node ->
                 node != null && (node.getStatus() == com.github.agentdock.core.planning.PlanNodeStatus.PENDING
                         || node.getStatus() == com.github.agentdock.core.planning.PlanNodeStatus.SUCCESS));
-        if (!safeStatuses || plan.readyNodes().isEmpty())
-            throw new IllegalArgumentException("检查点包含状态不确定或不可继续的节点，拒绝自动重放");
+        var successfulResultIds = new java.util.HashSet<String>();
+        if (snapshot.getResults() != null) snapshot.getResults().stream()
+                .filter(java.util.Objects::nonNull)
+                .filter(result -> result.getStatus() == com.github.agentdock.core.type.IntentStatus.SUCCESS)
+                .map(com.github.agentdock.core.model.IntentResult::getIntentId)
+                .filter(java.util.Objects::nonNull)
+                .forEach(successfulResultIds::add);
+        boolean completeResults = plan.getNodes().values().stream().allMatch(node ->
+                node != null && (node.getStatus() != com.github.agentdock.core.planning.PlanNodeStatus.SUCCESS
+                        || node.getId() != null && successfulResultIds.contains(node.getId())));
+        boolean hasPendingNodes = plan.getNodes().values().stream().anyMatch(node ->
+                node != null && node.getStatus() == com.github.agentdock.core.planning.PlanNodeStatus.PENDING);
+        if (!safeStatuses || !completeResults || hasPendingNodes && plan.readyNodes().isEmpty())
+            throw new IllegalArgumentException("检查点包含状态不确定、结果不完整或不可继续的节点，拒绝自动重放");
     }
 
     /** 会话记忆由宿主存储；未注册时不进行任何记忆查询。 */
