@@ -67,6 +67,8 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 invocation.getCapabilityCode(), startedAt);
         int recoveries = 0;
         boolean compensationAttempted = false;
+        boolean unknownOutcomeRecoveryAttempted = false;
+        boolean unknownOutcomeRecovered = false;
         String actualCapabilityCode = invocation.getCapabilityCode();
         int retries = retryPolicy.retries(definition, remainingRecoveries);
         CapabilityResult result;
@@ -80,13 +82,13 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
         } while (true);
 
         if (result.isOutcomeUnknown() && definition.isSideEffect() && capability.supportsUnknownOutcomeRecovery()) {
+            unknownOutcomeRecoveryAttempted = true;
             CapabilityResult recovered = recoverUnknownOnce(capability, intent, context, invocation, result,
                     definition.getTimeout());
-            recoveries++;
             if (recovered != null && recovered.isSuccess()) {
                 CapabilityResult validatedRecovery = validateOutput(definition, recovered);
-                result = validatedRecovery != null && validatedRecovery.isSuccess()
-                        ? validatedRecovery
+                unknownOutcomeRecovered = validatedRecovery != null && validatedRecovery.isSuccess();
+                result = unknownOutcomeRecovered ? validatedRecovery
                         : CapabilityResult.unknown("未知写入的核实结果不符合能力输出契约，仍需人工核实");
             } else {
                 String detail = recovered == null ? "核实能力未返回结果" : recovered.getMessage();
@@ -123,13 +125,13 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
                 actualCapabilityCode = fallbackCode;
                 if (result.isOutcomeUnknown() && fallbackDefinition.isSideEffect()
                         && fallback.supportsUnknownOutcomeRecovery()) {
+                    unknownOutcomeRecoveryAttempted = true;
                     CapabilityResult recovered = recoverUnknownOnce(fallback, intent, context, fallbackInvocation,
                             result, fallbackDefinition.getTimeout());
-                    recoveries++;
                     if (recovered != null && recovered.isSuccess()) {
                         CapabilityResult validatedRecovery = validateOutput(fallbackDefinition, recovered);
-                        result = validatedRecovery != null && validatedRecovery.isSuccess()
-                                ? validatedRecovery
+                        unknownOutcomeRecovered = validatedRecovery != null && validatedRecovery.isSuccess();
+                        result = unknownOutcomeRecovered ? validatedRecovery
                                 : CapabilityResult.unknown("替代能力的未知写入核实结果不符合输出契约，仍需人工核实");
                     } else {
                         String detail = recovered == null ? "核实能力未返回结果" : recovered.getMessage();
@@ -140,7 +142,7 @@ public final class DefaultCapabilityInvoker implements CapabilityInvoker {
             }
         }
         return new CapabilityCallResult(result, recoveries, actualCapabilityCode, compensationAttempted,
-                elapsedMillis(startedAt));
+                elapsedMillis(startedAt), unknownOutcomeRecoveryAttempted, unknownOutcomeRecovered);
     }
 
     private CapabilityResult compensateOnce(AiCapability capability, IntentCandidate intent,

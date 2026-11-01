@@ -148,7 +148,9 @@ class UnknownOutcomeTest {
         assertTrue(call.result().isSuccess(), call.result().toString());
         assertEquals(1, writes.get());
         assertEquals(1, verifications.get());
-        assertEquals(1, call.recoveryAttempts());
+        assertEquals(0, call.recoveryAttempts());
+        assertTrue(call.unknownOutcomeRecoveryAttempted());
+        assertTrue(call.unknownOutcomeRecovered());
     }
 
     @Test void invalidUnknownOutcomeRecoveryRemainsUnknown() {
@@ -172,7 +174,9 @@ class UnknownOutcomeTest {
                 new AiExecutionContext(), new CapabilityInvocation("invalid-recovery", Map.of()), 0);
 
         assertTrue(call.result().isOutcomeUnknown());
-        assertEquals(1, call.recoveryAttempts());
+        assertEquals(0, call.recoveryAttempts());
+        assertTrue(call.unknownOutcomeRecoveryAttempted());
+        assertFalse(call.unknownOutcomeRecovered());
     }
 
     @Test void fallbackUnknownOutcomeCanUseItsOwnRecoveryHook() {
@@ -206,12 +210,66 @@ class UnknownOutcomeTest {
         });
 
         CapabilityCallResult call = new DefaultCapabilityInvoker(registry).invoke(new IntentCandidate(),
-                new AiExecutionContext(), new CapabilityInvocation("primary-failure", Map.of()), 2);
+                new AiExecutionContext(), new CapabilityInvocation("primary-failure", Map.of()), 1);
 
         assertTrue(call.result().isSuccess(), call.result().toString());
         assertEquals("fallback-write", call.actualCapabilityCode());
         assertEquals(1, fallbackCalls.get());
         assertEquals(1, verifications.get());
-        assertEquals(2, call.recoveryAttempts());
+        assertEquals(1, call.recoveryAttempts());
+        assertTrue(call.unknownOutcomeRecoveryAttempted());
+        assertTrue(call.unknownOutcomeRecovered());
+    }
+
+    @Test void recoveryTimeoutRemainsUnknownAndNeverFallsBackOrRepeatsRecovery() throws Exception {
+        AtomicInteger writes = new AtomicInteger();
+        AtomicInteger verifications = new AtomicInteger();
+        AtomicInteger fallbackCalls = new AtomicInteger();
+        CountDownLatch verificationExited = new CountDownLatch(1);
+        CapabilityRegistry registry = new CapabilityRegistry();
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("slow-recovery", "核实超时样本", Map.of(), Map.of(),
+                        true, true, false, Duration.ofMillis(80), 2, List.of("recovery-fallback"));
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                writes.incrementAndGet();
+                return CapabilityResult.unknown("写入回执丢失");
+            }
+            public boolean supportsUnknownOutcomeRecovery() { return true; }
+            public CapabilityResult recoverUnknownOutcome(IntentCandidate intent, AiExecutionContext context,
+                    CapabilityInvocation invocation, CapabilityResult previousUnknown) {
+                verifications.incrementAndGet();
+                try {
+                    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
+                    while (System.nanoTime() < deadline) {
+                        try { Thread.sleep(20); } catch (InterruptedException ignored) { }
+                    }
+                    return CapabilityResult.success("核实超时后仍然不能作为本次调用成功回执");
+                } finally { verificationExited.countDown(); }
+            }
+        });
+        registry.register(new AiCapability() {
+            public CapabilityDefinition definition() {
+                return new CapabilityDefinition("recovery-fallback", "不得执行的替代写", Map.of(), Map.of(),
+                        true, true, false, Duration.ofSeconds(1), 0, List.of());
+            }
+            public CapabilityResult invoke(IntentCandidate intent, AiExecutionContext context) {
+                fallbackCalls.incrementAndGet();
+                return CapabilityResult.success("不应调用");
+            }
+        });
+
+        CapabilityCallResult call = new DefaultCapabilityInvoker(registry).invoke(new IntentCandidate(),
+                new AiExecutionContext(), new CapabilityInvocation("slow-recovery", Map.of()), 0);
+
+        assertTrue(call.result().isOutcomeUnknown());
+        assertTrue(call.unknownOutcomeRecoveryAttempted());
+        assertFalse(call.unknownOutcomeRecovered());
+        assertEquals(0, call.recoveryAttempts());
+        assertTrue(verificationExited.await(1, TimeUnit.SECONDS));
+        assertEquals(1, writes.get());
+        assertEquals(1, verifications.get());
+        assertEquals(0, fallbackCalls.get());
     }
 }

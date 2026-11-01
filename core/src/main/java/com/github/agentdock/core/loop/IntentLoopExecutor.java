@@ -294,7 +294,9 @@ public final class IntentLoopExecutor {
                 payload("requestedCapabilityCode", invocation.getCapabilityCode(),
                         "capabilityCode", call.actualCapabilityCode(), "capabilityDescription", definition.getDescription(),
                         "arguments", invocation.getArguments(), "result", call.result(), "recoveryAttempts", call.recoveryAttempts(),
-                        "compensationAttempted", call.compensationAttempted(), "elapsedMillis", call.elapsedMillis()));
+                        "compensationAttempted", call.compensationAttempted(), "elapsedMillis", call.elapsedMillis(),
+                        "unknownOutcomeRecoveryAttempted", call.unknownOutcomeRecoveryAttempted(),
+                        "unknownOutcomeRecovered", call.unknownOutcomeRecovered()));
         if (call.result().isSuccess()) return IntentResult.success(intent, call.result().getOutput());
         if (call.result().isOutcomeUnknown()) return IntentResult.waitingUser(intent, call.result().getMessage());
         return IntentResult.failed(intent, call.result().getMessage());
@@ -492,7 +494,8 @@ public final class IntentLoopExecutor {
                         ? invocation.getCapabilityCode() : call.actualCapabilityCode();
                 observations.add(new AgentObservation(actualCapabilityCode, invocation.getCapabilityCode(),
                         invocation.getArguments(), result, call.recoveryAttempts(),
-                        call.compensationAttempted(), call.elapsedMillis()));
+                        call.compensationAttempted(), call.elapsedMillis(), call.unknownOutcomeRecoveryAttempted(),
+                        call.unknownOutcomeRecovered()));
                 publish(context, intent, AiEventType.TOOL_RESULT,
                         toolResultMessage(definition, result), 65,
                         payload("requestedCapabilityCode", invocation.getCapabilityCode(),
@@ -500,7 +503,9 @@ public final class IntentLoopExecutor {
                                 "capabilityDescription", definition == null ? null : definition.getDescription(),
                                 "arguments", invocation.getArguments(), "result", result, "recoveryAttempts", call.recoveryAttempts(),
                                 "compensationAttempted", call.compensationAttempted(),
-                                "elapsedMillis", call.elapsedMillis()));
+                                "elapsedMillis", call.elapsedMillis(),
+                                "unknownOutcomeRecoveryAttempted", call.unknownOutcomeRecoveryAttempted(),
+                                "unknownOutcomeRecovered", call.unknownOutcomeRecovered()));
                 if (result.isOutcomeUnknown()) return IntentResult.waitingUser(intent, result.getMessage());
                 allTerminal &= definition != null && definition.isTerminalResult();
                 allSuccessful &= result.isSuccess();
